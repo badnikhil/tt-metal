@@ -15,7 +15,7 @@ construction. The dicts are:
     UNARY/BINARY_SFPU_OPS  set of supported MathOperation, set via _sfpu_ops class attr
 """
 
-from typing import Annotated, ClassVar, List, Literal, Optional, Tuple
+from typing import Annotated, ClassVar, Dict, List, Literal, Optional, Tuple, Union
 
 from fuser.compute_pipeline import ComputePipeline
 from fuser.fpu_node import FpuNode
@@ -65,6 +65,49 @@ SFPU_TILE_SIZES = {
     (32, 16),
     (32, 32),
 }
+
+LOOP_SLOT_NAMES = frozenset({"in0", "in1", "dest", "out", "src0", "src1"})
+
+
+class LoopSlotSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    base: int = 0
+    multipliers: Dict[str, int] = {}
+
+
+class LoopSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ref: Optional[str] = None
+    in0: Optional[Union[List[int], LoopSlotSpec]] = None
+    in1: Optional[Union[List[int], LoopSlotSpec]] = None
+    dest: Optional[Union[List[int], LoopSlotSpec]] = None
+    out: Optional[Union[List[int], LoopSlotSpec]] = None
+    src0: Optional[Union[List[int], LoopSlotSpec]] = None
+    src1: Optional[Union[List[int], LoopSlotSpec]] = None
+
+    @model_validator(mode="after")
+    def validate_lists(self) -> "LoopSchema":
+        list_lengths = {}
+        for slot in LOOP_SLOT_NAMES:
+            value = getattr(self, slot)
+            if isinstance(value, list):
+                list_lengths[slot] = len(value)
+        if list_lengths:
+            lengths = set(list_lengths.values())
+            if len(lengths) > 1:
+                raise ValueError(
+                    f"all index lists must have the same length, got {list_lengths}"
+                )
+        return self
+
+    def slot_overrides(self) -> Dict[str, Union[List[int], LoopSlotSpec]]:
+        return {
+            slot: getattr(self, slot)
+            for slot in LOOP_SLOT_NAMES
+            if getattr(self, slot) is not None
+        }
 
 
 def reject(condition, message):
@@ -299,6 +342,7 @@ class UnarySfpuMathSchema(BaseModel):
     iterations: Annotated[int, Field(ge=1)] = 8
     dst_dest_tile_index: Annotated[int, Field(ge=0)] = 0
     fill_const_value: float = 1.0
+    loop: Optional[Union[str, LoopSchema]] = None
 
     @field_validator("operation", mode="before")
     @classmethod
@@ -328,7 +372,7 @@ class UnarySfpuMathSchema(BaseModel):
             self.dst_dest_tile_index,
             self.fill_const_value,
         )
-        return SfpuNode(sfpu=sfpu)
+        return SfpuNode(sfpu=sfpu, loop_spec=self.loop)
 
     def get_output_dimensions(self, operands) -> Optional[Tuple[int, int]]:
         return None
@@ -353,6 +397,7 @@ class BinarySfpuMathSchema(BaseModel):
     src1_dest_tile_index: Annotated[int, Field(ge=0)] = 0
     src2_dest_tile_index: Annotated[int, Field(ge=0)] = 0
     dst_dest_tile_index: Annotated[int, Field(ge=0)] = 0
+    loop: Optional[Union[str, LoopSchema]] = None
 
     @field_validator("operation", mode="before")
     @classmethod
@@ -383,7 +428,7 @@ class BinarySfpuMathSchema(BaseModel):
             self.src2_dest_tile_index,
             self.dst_dest_tile_index,
         )
-        return SfpuNode(sfpu=sfpu)
+        return SfpuNode(sfpu=sfpu, loop_spec=self.loop)
 
     def get_output_dimensions(self, operands) -> Optional[Tuple[int, int]]:
         return None
@@ -420,6 +465,7 @@ class FpuMathSchemaBase(BaseModel):
     reduce_to_tile: bool = False
     in0: Optional[str] = None
     in1: Optional[str] = None
+    loop: Optional[Union[str, LoopSchema]] = None
 
     @property
     def has_transpose(self) -> bool:
@@ -517,7 +563,7 @@ class FpuMathSchemaBase(BaseModel):
             unpacker_factory, _ = type(self)._unpacker_map[self.unpacker]
             kwargs["unpacker"] = unpacker_factory(self)
 
-        return FpuNode(fpu=fpu, src_a=src_a, src_b=src_b, **kwargs)
+        return FpuNode(fpu=fpu, src_a=src_a, src_b=src_b, loop_spec=self.loop, **kwargs)
 
     def get_output_dimensions(self, operands) -> Optional[Tuple[int, int]]:
         fn = type(self)._output_dims.get(self.operation)
@@ -539,6 +585,7 @@ class PackSchema(BaseModel):
     pack_relu: PackerReluType = PackerReluType.NoRelu
     relu_threshold: float = 0.0
     pack_l1_accumulation: L1Accumulation = L1Accumulation.No
+    loop: Optional[Union[str, LoopSchema]] = None
 
     @field_validator("packer", mode="after")
     @classmethod
@@ -565,6 +612,7 @@ class PackSchema(BaseModel):
             pack_relu=self.pack_relu,
             relu_threshold=self.relu_threshold,
             pack_l1_accumulation=self.pack_l1_accumulation,
+            loop_spec=self.loop,
         )
 
 
