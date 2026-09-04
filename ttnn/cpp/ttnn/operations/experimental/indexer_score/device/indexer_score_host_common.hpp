@@ -120,7 +120,9 @@ inline DeviceCausalGeometry device_causal_geometry(
         return {(args.chunk_start_idx + (device_index + tp_index) * Sq) / TW, 0u, 0u};
     }
     const uint32_t sp = args.block_cyclic->sp;
-    const uint32_t chunk_local = args.block_cyclic->chunk_local;  // cache per-shard slab width (elements)
+    // The stored block-cyclic layout is physical K geometry (compressed rows), while this mapping follows
+    // query ownership. Expand it back to query-token units before applying rotation/straddle arithmetic.
+    const uint32_t chunk_local = args.block_cyclic->chunk_local * args.key_compression_ratio;
     const uint32_t chunk_global = sp * chunk_local;
 
     if (args.sp_axis().has_value()) {

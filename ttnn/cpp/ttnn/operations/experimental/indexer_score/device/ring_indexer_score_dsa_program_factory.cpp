@@ -348,7 +348,7 @@ ProgramDescriptor build_ring_program_descriptor(
     make_cb(cb_q_arg, (stream_heads ? 2 : 1) * HB * QC * Dt, q_fmt, q_tile);
     make_cb(cb_k_arg, 2 * KC * Dt, k_fmt, k_tile);
     make_cb(cb_w_arg, Hi * QC, tt::DataFormat::Float16_b, bf16_tile);
-    make_cb(cb_mask_arg, num_mask_tiles, tt::DataFormat::Float16_b, bf16_tile);
+    make_cb(cb_mask_arg, args.key_compression_ratio + 1, tt::DataFormat::Float16_b, bf16_tile);
     // cb_qk stages the batched relu(q.kT) strip for the gate-mul phase.
     make_cb(cb_qk_arg, qk_col_batch * qk_batch_heads, acc_fmt, acc_tile);
     // cb_out_strip holds the untilized output, double-buffered (2*KC; no block-pool on the DSA path).
@@ -391,7 +391,7 @@ ProgramDescriptor build_ring_program_descriptor(
     sdpa_sig.initialized_fused_op = true;
 
     // Compile-time args (common dims + CB indices).
-    std::vector<uint32_t> common_ct = {Hi, Sqt, Tt, Dt, QC, KC, HB, G, /*block_tiles=*/0u};
+    std::vector<uint32_t> common_ct = {Hi, Sqt, Tt, Dt, QC, KC, HB, G, /*block_tiles=*/0u, args.key_compression_ratio};
     common_ct.insert(common_ct.end(), cb_id.begin(), cb_id.end());
 
     std::vector<uint32_t> reader_ct = common_ct;
@@ -555,10 +555,10 @@ ProgramDescriptor build_ring_program_descriptor(
                 q_sender,
                 cols_used - 1);
             // Reader tail (sequential push; slots named in rt_arg, matched positionally by the kernel).
-            reader_rt.push_back(k_batch_page_offset);        // rt_arg::reader_k_batch_offset (25)
-            reader_rt.push_back(kv_len_tiles);               // rt_arg::reader_kv_len_tiles (26)
-            reader_rt.append(fused_rt);             // rt_arg::reader_fused_rt_base (27..35): ring/dir/sems/split
-            reader_rt.push_back(k_local.buffer());  // rt_arg::reader_k_local_addr (36): local SP shard address
+            reader_rt.push_back(k_batch_page_offset);  // rt_arg::reader_k_batch_offset (25)
+            reader_rt.push_back(kv_len_tiles);         // rt_arg::reader_kv_len_tiles (26)
+            reader_rt.append(fused_rt);                // rt_arg::reader_fused_rt_base (27..35): ring/dir/sems/split
+            reader_rt.push_back(k_local.buffer());     // rt_arg::reader_k_local_addr (36): local SP shard address
             reader_rt.push_back(k_local_batch_page_offset);  // selected slot in the original local cache
             reader_rt.append(band_perm);                     // rt_arg::reader_band_perm_base (38..): band-visit perm
             reader_kernel.emplace_runtime_args(core, reader_rt);

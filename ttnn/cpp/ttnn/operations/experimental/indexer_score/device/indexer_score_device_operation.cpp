@@ -44,7 +44,8 @@ uint32_t max_linearized_rank(const Tensor& q, std::optional<uint32_t> axis) {
 //     SP rank 0; no sub-shard -> TP rank 0), mirroring device_causal_geometry's no-block-cyclic branch.
 uint32_t max_chunk_start(const operation_attributes_t& attrs, const Tensor& q, uint32_t Sq) {
     if (attrs.block_cyclic.has_value()) {
-        return attrs.chunk_start_idx + attrs.block_cyclic->sp * attrs.block_cyclic->chunk_local - Sq;
+        const uint32_t query_chunk_local = attrs.block_cyclic->chunk_local * attrs.key_compression_ratio;
+        return attrs.chunk_start_idx + attrs.block_cyclic->sp * query_chunk_local - Sq;
     }
     const uint32_t tp_rank = attrs.tp_axis().has_value() ? max_linearized_rank(q, attrs.tp_axis()) : 0u;
     return attrs.chunk_start_idx + (max_linearized_rank(q, attrs.sp_axis()) + tp_rank) * Sq;
@@ -130,27 +131,33 @@ void validate_chunk_start(const operation_attributes_t& attrs, const tensor_args
         "chunk_start_idx {} must be tile-aligned",
         attrs.chunk_start_idx);
     const uint32_t max_cs = max_chunk_start(attrs, t.q, Sq);
+    const uint32_t required_k_rows = (max_cs + Sq) / attrs.key_compression_ratio;
     TT_FATAL(
-        max_cs + Sq <= T,
-        "fullest-device chunk window [{}, {}+{}) exceeds T={} (base={}, per-rank stride Sq={})",
+        required_k_rows <= T,
+        "fullest-device query window [{}, {}+{}) requires {} compressed K rows, exceeding T={} "
+        "(base={}, ratio={}, per-rank stride Sq={})",
         max_cs,
         max_cs,
         Sq,
+        required_k_rows,
         T,
         attrs.chunk_start_idx,
+        attrs.key_compression_ratio,
         Sq);
     // Causal window must also stay inside the valid prefix.
     if (attrs.kv_len.has_value()) {
         const uint32_t kv_len = attrs.kv_len.value();
         TT_FATAL(
-            max_cs + Sq <= kv_len,
-            "fullest-device causal window [{}, {}+{}) exceeds kv_len={} (cannot attend past the valid keys; "
-            "base={}, per-rank stride Sq={})",
+            required_k_rows <= kv_len,
+            "fullest-device query window [{}, {}+{}) requires {} compressed K rows, exceeding kv_len={} "
+            "(base={}, ratio={}, per-rank stride Sq={})",
             max_cs,
             max_cs,
             Sq,
+            required_k_rows,
             kv_len,
             attrs.chunk_start_idx,
+            attrs.key_compression_ratio,
             Sq);
     }
 }
@@ -163,7 +170,7 @@ void validate_block_cyclic(const operation_attributes_t& attrs, const tensor_arg
         return;
     }
     const uint32_t sp = attrs.block_cyclic->sp;
-    const uint32_t chunk_local = attrs.block_cyclic->chunk_local;
+    const uint32_t chunk_local = attrs.block_cyclic->chunk_local;  // compressed K rows
     const uint32_t chunk_global = sp * chunk_local;
     const uint32_t T = t.k.logical_shape()[2];
     const uint32_t Sq = t.q.logical_shape()[2];
@@ -178,11 +185,12 @@ void validate_block_cyclic(const operation_attributes_t& attrs, const tensor_arg
         chunk_global,
         T);
     TT_FATAL(
-        Sq <= chunk_local,
-        "Sq ({}) must be <= block_cyclic_chunk_local ({}); a device's queries may cross at most one cache-slab "
+        Sq <= chunk_local * attrs.key_compression_ratio,
+        "Sq ({}) must be <= block_cyclic_chunk_local ({}) query rows; a device's queries may cross at most one "
+        "cache-slab "
         "boundary (one straddle). A coarser indexer SP (Sq > chunk_local) is not yet supported.",
         Sq,
-        chunk_local);
+        chunk_local * attrs.key_compression_ratio);
 }
 
 // Semaphore addresses are hashed, but different mesh devices can allocate the same L1 addresses. Re-check
@@ -254,6 +262,7 @@ ttsl::hash::hash_t IndexerScoreDeviceOperation::compute_program_hash(
 
     return tt::tt_metal::operation::hash_operation<IndexerScoreDeviceOperation>(
         attrs.apply_relu,
+        attrs.key_compression_ratio,
         attrs.num_groups,
         attrs.block_size,
         attrs.synthesize_gate,  // gate read from DRAM vs filled in-kernel -> different reader binary
@@ -413,6 +422,13 @@ void IndexerScoreDeviceOperation::validate_on_program_cache_miss(
     const uint32_t D = q_shape[3];
     const uint32_t T = k_shape[2];
     TT_FATAL(
+        attrs.key_compression_ratio == 1 || attrs.key_compression_ratio == 4,
+        "indexer_score key_compression_ratio must be 1 or 4 (got {})",
+        attrs.key_compression_ratio);
+    TT_FATAL(
+        attrs.apply_relu || attrs.key_compression_ratio == 1,
+        "indexer_score_msa supports key_compression_ratio=1 only");
+    TT_FATAL(
         Sq % tt::constants::TILE_HEIGHT == 0 && T % tt::constants::TILE_WIDTH == 0 &&
             D % tt::constants::TILE_WIDTH == 0,
         "Sq {}, T {}, D {} must be tile-aligned",
@@ -534,14 +550,18 @@ IndexerScoreDeviceOperation::create_op_performance_model(
     const uint32_t D = q_shape[3];
     const uint32_t Sqt = q_shape[2] / tt::constants::TILE_HEIGHT;
     const uint32_t Tt = k_shape[2] / tt::constants::TILE_WIDTH;
-    const uint32_t chunk_t = attrs.chunk_start_idx / tt::constants::TILE_WIDTH;
+    const uint32_t ratio = attrs.key_compression_ratio;
 
     // Causal-valid output tiles V = sum_rows min(kv_len_tiles, chunk_t + row + 1) (masked future excluded;
     // matches the test's sp7_valid_tiles()). kv_len caps per-row valid columns; nullopt == full Tt.
     const uint32_t kv_len_tiles = attrs.kv_len.has_value() ? attrs.kv_len.value() / tt::constants::TILE_WIDTH : Tt;
     uint64_t valid_tiles = 0;
     for (uint32_t s = 0; s < Sqt; ++s) {
-        valid_tiles += std::min<uint64_t>(kv_len_tiles, (uint64_t)chunk_t + s + 1);
+        const uint64_t query_end_exclusive =
+            static_cast<uint64_t>(attrs.chunk_start_idx) + (static_cast<uint64_t>(s) + 1) * tt::constants::TILE_HEIGHT;
+        const uint64_t valid_key_rows = query_end_exclusive / ratio;
+        const uint64_t touched_key_tiles = (valid_key_rows + tt::constants::TILE_WIDTH - 1) / tt::constants::TILE_WIDTH;
+        valid_tiles += std::min<uint64_t>(kv_len_tiles, touched_key_tiles);
     }
 
     // Per valid 32x32 tile per head: (32*32) outputs x 2*D FLOPs; summed over heads/tiles/batch
@@ -586,6 +606,7 @@ IndexerScoreDeviceOperation::invoke(
     const Tensor& k,
     const Tensor& weights,
     uint32_t chunk_start_idx,
+    uint32_t key_compression_ratio,
     bool apply_relu,
     uint32_t num_groups,
     uint32_t block_size,
@@ -600,6 +621,7 @@ IndexerScoreDeviceOperation::invoke(
     return {
         operation_attributes_t{
             .chunk_start_idx = chunk_start_idx,
+            .key_compression_ratio = key_compression_ratio,
             .seq_shard_axes = std::move(seq_shard_axes),
             .apply_relu = apply_relu,
             .num_groups = num_groups,
@@ -645,6 +667,7 @@ ttnn::Tensor launch_indexer_score(
     const ttnn::Tensor& k,
     const ttnn::Tensor& weights,
     std::optional<uint32_t> chunk_start_idx,
+    uint32_t key_compression_ratio,
     bool apply_relu,
     uint32_t num_groups,
     uint32_t block_size,
@@ -668,6 +691,10 @@ ttnn::Tensor launch_indexer_score(
     using ttnn::operations::experimental::indexer_score::BlockCyclicLayout;
 
     const uint32_t Sq = q.logical_shape()[2];
+    TT_FATAL(
+        key_compression_ratio == 1 || key_compression_ratio == 4,
+        "indexer_score: key_compression_ratio must be 1 or 4 (got {})",
+        key_compression_ratio);
 
     // Block-cyclic (per-SP-shard) K layout -- interface matches ttnn.transformer.sparse_sdpa: the caller
     // names the MESH AXIS the cache was striped over (block_cyclic_sp_axis) and passes the per-shard chunk
@@ -705,14 +732,19 @@ ttnn::Tensor launch_indexer_score(
             mesh_shape.dims());
         const uint32_t sp = mesh_shape[sp_axis];
         const uint32_t tp = static_cast<uint32_t>(mesh_shape.mesh_size()) / sp;  // remaining (TP) device count
-        const uint32_t chunk_local = *block_cyclic_chunk_local;
+        TT_FATAL(
+            *block_cyclic_chunk_local % key_compression_ratio == 0,
+            "indexer_score: block_cyclic_chunk_local ({}) must be divisible by key_compression_ratio ({})",
+            *block_cyclic_chunk_local,
+            key_compression_ratio);
+        const uint32_t query_chunk_local = *block_cyclic_chunk_local;
         // chunk_local is one of exactly two legal values (the cross-check sparse_sdpa also applies): q's
         // per-chip seq length (seq sharded only on the SP axis) or tp*q_isl (seq also sliced across the TP
         // axis, post-reshard). Anything else is a producer bug.
         TT_FATAL(
-            chunk_local == Sq || chunk_local == Sq * tp,
+            query_chunk_local == Sq || query_chunk_local == Sq * tp,
             "indexer_score: block_cyclic_chunk_local ({}) must be q_isl ({}) or tp*q_isl ({})",
-            chunk_local,
+            query_chunk_local,
             Sq,
             Sq * tp);
         // Seq sharded across BOTH axes (chunk_local == tp*q_isl, tp > 1) needs the second axis's seq offset.
@@ -723,7 +755,7 @@ ttnn::Tensor launch_indexer_score(
         //   (b) seq_shard_axes=[SP, TP] -> the EXACT block-cyclic geometry (mirroring rotated_chip_positions)
         //       adds the tp_rank*Sq sub-offset. Rotation-exact.
         // A lone SP axis (seq_shard_axes=[SP]) would miss the TP offset entirely -- reject that.
-        const bool both_axes = (chunk_local == Sq * tp && tp > 1);
+        const bool both_axes = (query_chunk_local == Sq * tp && tp > 1);
         TT_FATAL(
             !(both_axes && cluster_axis.has_value() && !seq_subshard_axis.has_value()),
             "indexer_score: block_cyclic_chunk_local == tp*q_isl (tp={} > 1) with seq_shard_axes=[SP] needs the "
@@ -736,7 +768,7 @@ ttnn::Tensor launch_indexer_score(
                 "indexer_score: seq_shard_axes TP axis needs the SP axis present (seq_shard_axes=[SP, TP]) and a "
                 "2D seq shard (block_cyclic_chunk_local == tp*q_isl); got has_sp_axis={}, chunk_local={}, Sq*tp={}",
                 cluster_axis.has_value(),
-                chunk_local,
+                query_chunk_local,
                 Sq * tp);
             TT_FATAL(
                 *seq_subshard_axis < mesh_shape.dims() && *seq_subshard_axis != *cluster_axis,
@@ -748,7 +780,7 @@ ttnn::Tensor launch_indexer_score(
         // Store {sp, chunk_local} (matching sparse_sdpa's BlockCyclicLayout); the factory derives the global
         // chunk (sp*chunk_local) and the invP tile divisors from these.
         if (sp > 1) {
-            block_cyclic = BlockCyclicLayout{.sp = sp, .chunk_local = chunk_local};
+            block_cyclic = BlockCyclicLayout{.sp = sp, .chunk_local = query_chunk_local / key_compression_ratio};
         }
     }
 
@@ -763,14 +795,16 @@ ttnn::Tensor launch_indexer_score(
     } else {
         const uint32_t T = k.logical_shape()[2];
         if (block_cyclic.has_value()) {
-            const uint32_t chunk = block_cyclic->sp * block_cyclic->chunk_local;
+            const uint32_t query_chunk = block_cyclic->sp * block_cyclic->chunk_local * key_compression_ratio;
             TT_FATAL(
-                T >= chunk,
-                "indexer_score: cannot deduce chunk_start_idx -- T={} < global chunk={}. Pass chunk_start_idx "
+                static_cast<uint64_t>(T) * key_compression_ratio >= query_chunk,
+                "indexer_score: cannot deduce chunk_start_idx -- compressed T={} (ratio {}) is shorter than "
+                "global query chunk={}. Pass chunk_start_idx "
                 "explicitly if K does not equal history + the gathered chunk.",
                 T,
-                chunk);
-            base = T - chunk;
+                key_compression_ratio,
+                query_chunk);
+            base = T * key_compression_ratio - query_chunk;
         } else {
             // seq_ring = max_rank + 1 (get_linearized_index returns coord-min; get_topological_dimension would
             // over-count on a nonzero-offset sub-mesh). A TP sub-shard is possible here only for SP=1, whose
@@ -779,13 +813,15 @@ ttnn::Tensor launch_indexer_score(
             const uint32_t seq_ring =
                 ttnn::operations::experimental::indexer_score::max_linearized_rank(q, seq_axis) + 1;
             TT_FATAL(
-                T >= seq_ring * Sq,
-                "indexer_score: cannot deduce chunk_start_idx -- T={} < seq_ring({})*Sq({}). Pass chunk_start_idx "
+                static_cast<uint64_t>(T) * key_compression_ratio >= seq_ring * Sq,
+                "indexer_score: cannot deduce chunk_start_idx -- compressed T={} (ratio {}) < "
+                "seq_ring({})*Sq({}) query tokens. Pass chunk_start_idx "
                 "explicitly if K does not equal history + the gathered query chunk.",
                 T,
+                key_compression_ratio,
                 seq_ring,
                 Sq);
-            base = T - seq_ring * Sq;
+            base = T * key_compression_ratio - seq_ring * Sq;
         }
     }
 
@@ -805,6 +841,7 @@ ttnn::Tensor launch_indexer_score(
         k,
         weights,
         base,
+        key_compression_ratio,
         apply_relu,
         num_groups,
         block_size,
@@ -829,6 +866,7 @@ ttnn::Tensor indexer_score_dsa(
     const ttnn::Tensor& k,
     const ttnn::Tensor& weights,
     std::optional<uint32_t> chunk_start_idx,
+    uint32_t key_compression_ratio,
     const ttnn::operations::experimental::indexer_score::IndexerScoreProgramConfig& program_config,
     const std::optional<ttnn::DeviceComputeKernelConfig>& compute_kernel_config,
     std::optional<uint32_t> cache_batch_idx,
@@ -842,6 +880,7 @@ ttnn::Tensor indexer_score_dsa(
         k,
         weights,
         chunk_start_idx,
+        key_compression_ratio,
         /*apply_relu=*/true,
         /*num_groups=*/1,
         /*block_size=*/0,
@@ -883,6 +922,7 @@ ttnn::Tensor indexer_score_msa(
         k,
         /*weights=*/q,
         chunk_start_idx,
+        /*key_compression_ratio=*/1,
         /*apply_relu=*/false,
         num_groups,
         block_size,
@@ -909,6 +949,7 @@ ttnn::Tensor ring_indexer_score_dsa(
     uint32_t num_links,
     std::optional<tt::tt_metal::SubDeviceId> ag_sub_device_id,
     std::optional<uint32_t> chunk_start_idx,
+    uint32_t key_compression_ratio,
     const ttnn::operations::experimental::indexer_score::IndexerScoreProgramConfig& program_config,
     const std::optional<ttnn::DeviceComputeKernelConfig>& compute_kernel_config,
     std::optional<uint32_t> cache_batch_idx,
@@ -932,6 +973,7 @@ ttnn::Tensor ring_indexer_score_dsa(
         k,
         weights,
         chunk_start_idx,
+        key_compression_ratio,
         /*apply_relu=*/true,
         /*num_groups=*/1,
         /*block_size=*/0,
