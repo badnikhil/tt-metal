@@ -56,10 +56,11 @@ def dense_sp_attention(
     logical_n         total valid prefix length (q attends causally over [0:logical_n])
     write_chunk       when False, skip the cache write and only read (the per-layer seam is the writer)
     slot_id, kv_actual_isl_tensor
-                      trace-safe read: 1-element uint32 device scalars holding the user slot and kv_actual,
+                      trace-safe path: 1-element uint32 device scalars holding the user slot and kv_actual,
                       read by the kernels at start, so a captured trace re-targets them in place between
-                      replays. Both or neither. The host slot / kv_actual are then NOT passed (a host
-                      kv_actual_isl would re-enable per-dispatch host patching) and logical_n is a placeholder
+                      replays. Both or neither. The chunk write (write_chunk) and the read both take them;
+                      the host slot_idx / kv_actual are then NOT passed to either op (a host kv_actual_isl
+                      would re-enable per-dispatch host patching) and logical_n is a placeholder
                       (cache_global): the kernels derive the real length as kv_actual_isl[0] + chunk.
     -> out            [1, n_q_local, chunk_local, head_dim]    block-cyclic over the chunk
     """
@@ -81,24 +82,28 @@ def dense_sp_attention(
         slot_kwargs = dict(kv_cache_batch_idx=slot_idx * num_layers + layer_idx, kv_actual_isl=kv_actual)
 
     if write_chunk:
-        ttnn.experimental.deepseek_prefill.update_padded_kv_cache(
-            cache_k,
-            tt_k_chunk,
-            slot_idx=slot_idx,
-            layer_idx=layer_idx,
-            num_layers=num_layers,
-            kv_actual_global=kv_actual,
-            cluster_axis=cluster_axis,
-        )
-        ttnn.experimental.deepseek_prefill.update_padded_kv_cache(
-            cache_v,
-            tt_v_chunk,
-            slot_idx=slot_idx,
-            layer_idx=layer_idx,
-            num_layers=num_layers,
-            kv_actual_global=kv_actual,
-            cluster_axis=cluster_axis,
-        )
+        for cache, chunk in ((cache_k, tt_k_chunk), (cache_v, tt_v_chunk)):
+            if slot_id is not None:
+                # Same two scalars the read below consumes, so a re-targeted trace writes and reads one slot.
+                ttnn.experimental.deepseek_prefill.update_padded_kv_cache(
+                    cache,
+                    chunk,
+                    slot_id,
+                    kv_actual_isl_tensor,
+                    layer_idx=layer_idx,
+                    num_layers=num_layers,
+                    cluster_axis=cluster_axis,
+                )
+            else:
+                ttnn.experimental.deepseek_prefill.update_padded_kv_cache(
+                    cache,
+                    chunk,
+                    slot_idx=slot_idx,
+                    layer_idx=layer_idx,
+                    num_layers=num_layers,
+                    kv_actual_global=kv_actual,
+                    cluster_axis=cluster_axis,
+                )
 
     out, _, _ = ttnn.transformer.ring_joint_scaled_dot_product_attention(
         tt_q,

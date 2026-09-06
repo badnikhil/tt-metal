@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """ring_joint cache-read through the trace-safe metadata path: bit-exact vs the host-int path, a cached program
-follows freshly allocated metadata tensors, and one captured trace re-targets the cache-user slot by rewriting the
-metadata tensors between replays.
+follows freshly allocated metadata tensors, the helper's chunk write lands in the tensor-selected slot, and one
+captured trace re-targets the cache-user slot by rewriting the metadata tensors between replays.
 
 Extends test_ring_joint_cache_read_sp_vs_ref to two users and two layers so the on-device slot fold
 (slot_id[0] * kv_cache_num_layers + kv_cache_layer_idx) is exercised, not just slot 0 / layer 0. Both users hold
@@ -205,6 +205,42 @@ def test_ring_joint_cache_read_metadata_trace(
         f"cached program did not follow fresh metadata tensors: max_abs vs user 1={(meta1 - host[1]).abs().max()}, "
         f"pcc_vs_user0={comp_pcc(host[0], meta1, 0.0)[1]}"
     )
+
+    # With write_chunk the helper also writes the chunk, and on this path the write must follow the tensors, not
+    # the host slot_idx (left at its default 0 here on purpose). Blank user 1's last chunk, then let the helper
+    # rewrite it with the tensors pointing at user 1: a host-slot write would land in user 0 and the read of
+    # user 1 would see zeros; a host-offset write is caught the same way via kv_actual.
+    zeros = torch.zeros(1, NKV, cache_global, HEAD_DIM, dtype=torch.bfloat16)
+    for cache in (cache_k, cache_v):
+        ttnn.experimental.deepseek_prefill.update_padded_kv_cache(
+            cache,
+            make_chunk(zeros[0], kv_actual_last),
+            slot_idx=1,
+            layer_idx=LAYER_IDX,
+            num_layers=NUM_LAYERS,
+            kv_actual_global=kv_actual_last,
+            cluster_axis=sp_axis,
+        )
+    meta1_written = gather(
+        dense_sp_attention(
+            tt_q,
+            cache_k,
+            cache_v,
+            make_chunk(k[1][0], kv_actual_last),
+            make_chunk(v[1][0], kv_actual_last),
+            kv_actual=kv_actual_last,
+            logical_n=cache_global,
+            slot_id=t_slot_fresh,
+            kv_actual_isl_tensor=t_kv_fresh,
+            **{**common, "write_chunk": True},
+        )
+    )
+    assert torch.equal(meta1_written, host[1]), (
+        f"write_chunk on the metadata path did not write user 1's slot: max_abs vs user 1="
+        f"{(meta1_written - host[1]).abs().max()}"
+    )
+    meta0_after = gather(run_meta(t_slot, t_kv))
+    assert torch.equal(meta0_after, host[0]), "write_chunk on the metadata path clobbered user 0's slot"
 
     # The program bakes a DRAM-interleaved single-page accessor for each metadata tensor and the hash never sees
     # the tensor itself, so a scalar of another form must be refused on a cache hit as well: an L1 scalar (a
