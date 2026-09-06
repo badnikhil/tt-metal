@@ -651,14 +651,11 @@ void bind_sdpa(nb::module_& mod) {
                 gathered joint K tensor [b x nhv x L x dv]. Allocated internally when omitted.
             persistent_output_buffer_joint_v (ttnn.Tensor, optional): Persistent buffer for the
                 gathered joint V tensor [b x nhv x L x dv]. Allocated internally when omitted.
-            slot_id (ttnn.Tensor, optional): Trace-safe metadata: 1-element uint32 ROW_MAJOR DRAM tensor
-                (replicated across the mesh) holding the cache-user slot, read on-device. Must be passed
-                together with kv_actual_isl_tensor. Defaults to None.
-            kv_actual_isl_tensor (ttnn.Tensor, optional): Trace-safe metadata: same form, holding the prior
-                valid global KV length before this chunk. Defaults to None.
-            kv_cache_num_layers (int, optional): Layers per user in a (user, layer)-major cache. On both paths
-                the cache batch is slot * kv_cache_num_layers + kv_cache_layer_idx, with slot = kv_cache_batch_idx
-                or slot_id[0] (mirrors update_padded_kv_cache). Defaults to 1.
+            slot_id (ttnn.Tensor, optional): Cache-user slot for the metadata path (see below). Defaults to None.
+            kv_actual_isl_tensor (ttnn.Tensor, optional): Prior valid global KV length for the metadata path
+                (see below). Defaults to None.
+            kv_cache_num_layers (int, optional): Layers per user in the (user, layer)-major cache fold (see
+                below). Defaults to 1.
             kv_cache_layer_idx (int, optional): This call's layer in that fold. Defaults to 0.
 
         Chunked-prefill mode is entered implicitly when input_tensor_q's per-device seq
@@ -672,12 +669,17 @@ void bind_sdpa(nb::module_& mod) {
         to KV-pad-aware rotation: logical_n remains the total valid KV length after this iteration,
         while kv_actual_isl marks the prior valid cache length before the current chunk.
 
-        Metadata (trace-safe) path: pass slot_id and kv_actual_isl_tensor instead of the host
-        kv_cache_batch_idx / kv_actual_isl (omit both host scalars). The cache slot and the prior
-        valid length are then read on-device at kernel start, so a captured trace re-targets them by
-        updating the two tensors in place between replays. logical_n stays the real total valid length:
-        the kernels derive it on-device as kv_actual_isl[0] + chunk and the program hash does not key it
-        on this path, so one program serves every chunk depth.
+        Metadata (trace-safe) path -- the one description of the contract, shared with ring_mla: pass
+        slot_id and kv_actual_isl_tensor together, each a 1-element uint32 ROW_MAJOR DRAM tensor
+        replicated across the mesh, instead of the host kv_cache_batch_idx / kv_actual_isl (mixing the two
+        forms is rejected). The kernels read the cache-user slot and the prior valid global KV length from
+        element [0] at kernel start, so a captured trace re-targets them by updating the two tensors in
+        place between replays. logical_n stays the real total valid length: the kernels derive it
+        on-device as kv_actual_isl[0] + chunk and the program hash does not key it on this path, so one
+        program serves every chunk depth. Sliding-window attention is not supported on this path.
+        Cache fold, both paths: the cache batch read is slot * kv_cache_num_layers + kv_cache_layer_idx,
+        with slot = kv_cache_batch_idx (host) or slot_id[0] (device), mirroring update_padded_kv_cache;
+        the defaults (1, 0) make it the identity.
 
         Returns:
             (ttnn.Tensor, ttnn.Tensor, ttnn.Tensor):
@@ -761,16 +763,15 @@ void bind_sdpa(nb::module_& mod) {
             kv_actual_isl (int, optional): Prior valid global KV length before this fixed-size chunk.
                 When passed, enables KV-pad-aware rotation and derives current valid tokens as
                 logical_n - kv_actual_isl.
-            slot_id (ttnn.Tensor, optional): Trace-safe metadata: 1-element uint32 ROW_MAJOR DRAM tensor
-                (replicated across the mesh) holding the cache-user slot, read on-device. Must be passed
-                together with kv_actual_isl_tensor; omit the host kv_cache_batch_idx / kv_actual_isl (the
-                mix is rejected). logical_n is not part of the program hash on this path. Defaults to None.
-            kv_actual_isl_tensor (ttnn.Tensor, optional): Trace-safe metadata: same form, holding the prior
-                valid global KV length before this chunk. Defaults to None.
-            kv_cache_num_layers (int, optional): Layers per user in a (user, layer)-major cache. On both paths
-                the cache batch is slot * kv_cache_num_layers + kv_cache_layer_idx, with slot = kv_cache_batch_idx
-                or slot_id[0]. Defaults to 1.
+            slot_id (ttnn.Tensor, optional): Cache-user slot for the metadata path. Defaults to None.
+            kv_actual_isl_tensor (ttnn.Tensor, optional): Prior valid global KV length for the metadata path.
+                Defaults to None.
+            kv_cache_num_layers (int, optional): Layers per user in the (user, layer)-major cache fold.
+                Defaults to 1.
             kv_cache_layer_idx (int, optional): This call's layer in that fold. Defaults to 0.
+
+        Metadata (trace-safe) path and cache fold: same contract as ring_joint_scaled_dot_product_attention;
+        see its docstring for the one full description.
 
         Returns:
             (ttnn.Tensor, ttnn.Tensor):
