@@ -17,14 +17,23 @@ from loguru import logger
 
 import ttnn
 from models.common.utility_functions import comp_pcc
-from models.demos.deepseek_v3_d_p.tt.mla.utils import rotated_chip_positions
 from models.demos.deepseek_v3_d_p.utils.kv_cache_utils import init_kvpe_cache
 from models.demos.minimax_m3.tt.attention.dense_sp import dense_sp_attention
 from models.demos.minimax_m3.tt.ccl import CCLManager
 from models.demos.minimax_m3.utils.general_utils import get_default_num_links
 
 from ..test_factory import parametrize_mesh_with_fabric
-from .test_ring_joint_cache_read_sp_vs_ref import HEAD_DIM, NKV, NQ, _torch_gqa_causal
+from .test_ring_joint_cache_read_sp_vs_ref import (
+    HEAD_DIM,
+    NKV,
+    NQ,
+    SP_AXIS,
+    _torch_gqa_causal,
+    gather_chunk,
+    make_kv_chunk,
+    make_q_chunk,
+    sdpa_configs,
+)
 
 NUM_USERS, NUM_LAYERS, LAYER_IDX = 2, 2, 1
 
@@ -58,7 +67,7 @@ def test_ring_joint_cache_read_metadata_trace(
 ):
     rows, cols = tuple(mesh_device.shape)
     assert (rows, cols) == (8, 4)
-    sp, sp_axis, tp_axis = rows, 0, 1
+    sp, sp_axis = rows, SP_AXIS
     C = chunk_local
     chunk_global = sp * C
     cache_global = n_chunks * chunk_global
@@ -79,23 +88,15 @@ def test_ring_joint_cache_read_metadata_trace(
     cache_v = init_kvpe_cache(
         HEAD_DIM, mesh_device, cache_global, list(mesh_device.shape), sp_axis, NUM_LAYERS, NUM_USERS
     )
-    wr_dims = [None, None]
-    wr_dims[sp_axis], wr_dims[tp_axis] = 2, 1
-
-    def bc_index(kv_actual):
-        pos = rotated_chip_positions(kv_actual, sp, C)
-        return torch.tensor([pos[c][r] for c in range(sp) for r in range(C)], dtype=torch.long)
 
     def make_chunk(src, kv_actual):
-        chunk = src[:, bc_index(kv_actual), :].reshape(1, NKV, chunk_global, HEAD_DIM)
-        return ttnn.from_torch(
-            chunk,
-            device=mesh_device,
-            dtype=ttnn.bfloat8_b,
-            layout=ttnn.TILE_LAYOUT,
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
-            mesh_mapper=ttnn.ShardTensor2dMesh(mesh_device, mesh_shape=(rows, cols), dims=wr_dims),
-        )
+        return make_kv_chunk(src, kv_actual, mesh_device, C)
+
+    def make_q(kv_actual):
+        return make_q_chunk(q, kv_actual, mesh_device, C)
+
+    def gather(out, kv_actual=kv_actual_last):
+        return gather_chunk(out, kv_actual, mesh_device, C)
 
     # Every chunk of every user goes into (user, LAYER_IDX); the other layer's slots stay zero.
     for u in range(NUM_USERS):
@@ -113,29 +114,8 @@ def test_ring_joint_cache_read_metadata_trace(
                 )
     ttnn.synchronize_device(mesh_device)
 
-    q_dims = [None, None]
-    q_dims[sp_axis], q_dims[tp_axis] = 2, 1
-
-    def make_q(kv_actual):
-        return ttnn.from_torch(
-            q[:, :, bc_index(kv_actual), :],
-            device=mesh_device,
-            dtype=ttnn.bfloat16,
-            layout=ttnn.TILE_LAYOUT,
-            mesh_mapper=ttnn.ShardTensor2dMesh(mesh_device, mesh_shape=(rows, cols), dims=q_dims),
-        )
-
     tt_q = make_q(kv_actual_last)
-    grid = mesh_device.compute_with_storage_grid_size()
-    prog = ttnn.SDPAProgramConfig(
-        compute_with_storage_grid_size=ttnn.CoreCoord(grid.x - 1, grid.y),
-        q_chunk_size=128,
-        k_chunk_size=512,
-        exp_approx_mode=False,
-    )
-    kcfg = ttnn.WormholeComputeKernelConfig(
-        math_fidelity=ttnn.MathFidelity.HiFi4, math_approx_mode=False, fp32_dest_acc_en=False, packer_l1_acc=False
-    )
+    prog, kcfg = sdpa_configs(mesh_device)
     common = dict(
         n_kv=NKV,
         cache_global=cache_global,
@@ -150,17 +130,6 @@ def test_ring_joint_cache_read_metadata_trace(
         num_layers=NUM_LAYERS,
         write_chunk=False,
     )
-
-    def gather(out, kv_actual=kv_actual_last):
-        # per chip [1, NQ/tp, C, HD] block-cyclic over the chunk at kv_actual -> [1, NQ, chunk_global, HD] natural
-        dts = ttnn.get_device_tensors(out)
-        full_bc = torch.cat(
-            [torch.cat([ttnn.to_torch(dts[r * cols + c]).float() for c in range(cols)], dim=1) for r in range(rows)],
-            dim=2,
-        )
-        inv = torch.empty(chunk_global, dtype=torch.long)
-        inv[bc_index(kv_actual) - kv_actual] = torch.arange(chunk_global)
-        return full_bc[:, :, inv, :]
 
     def run_host(u, q_t=tt_q, kv_actual=kv_actual_last):
         out = dense_sp_attention(

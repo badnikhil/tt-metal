@@ -30,6 +30,10 @@ from models.demos.minimax_m3.utils.general_utils import get_default_num_links
 from ..test_factory import parametrize_mesh_with_fabric
 
 NQ, NKV, HEAD_DIM = 64, 4, 128
+# SP over mesh rows, TP over mesh cols: chunk tensors shard the sequence (dim 2) over rows and heads (dim 1) over
+# cols; the same pair drives the mapper on the way in and the composer on the way out.
+SP_AXIS = 0
+SHARD_DIMS = (2, 1)
 
 
 def _torch_gqa_causal(q, k, v):
@@ -39,6 +43,64 @@ def _torch_gqa_causal(q, k, v):
     scores = (q @ k.transpose(-1, -2)) * (HEAD_DIM**-0.5)
     causal = torch.triu(torch.full((s, s), float("-inf")), diagonal=1)
     return torch.softmax(scores + causal, dim=-1) @ v  # [1, NQ, S, HD]
+
+
+def bc_index(kv_actual, sp, chunk_local):
+    """Global positions of the chunk starting at kv_actual, in the chip-major block-cyclic order the SP shards hold."""
+    pos = rotated_chip_positions(kv_actual, sp, chunk_local)
+    return torch.tensor([pos[c][r] for c in range(sp) for r in range(chunk_local)], dtype=torch.long)
+
+
+def _shard(t, mesh_device, dtype):
+    rows, cols = tuple(mesh_device.shape)
+    return ttnn.from_torch(
+        t,
+        device=mesh_device,
+        dtype=dtype,
+        layout=ttnn.TILE_LAYOUT,
+        memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        mesh_mapper=ttnn.ShardTensor2dMesh(mesh_device, mesh_shape=(rows, cols), dims=SHARD_DIMS),
+    )
+
+
+def make_kv_chunk(src, kv_actual, mesh_device, chunk_local):
+    """src [heads, S, HD] host K or V -> this chunk, block-cyclic, sharded, in the cache's bf8 dtype."""
+    sp = mesh_device.shape[0]
+    chunk = src[:, bc_index(kv_actual, sp, chunk_local), :].reshape(1, src.shape[0], sp * chunk_local, HEAD_DIM)
+    return _shard(chunk, mesh_device, ttnn.bfloat8_b)
+
+
+def make_q_chunk(q, kv_actual, mesh_device, chunk_local):
+    """q [1, NQ, S, HD] host -> the chunk's queries, block-cyclic, sharded."""
+    return _shard(q[:, :, bc_index(kv_actual, mesh_device.shape[0], chunk_local), :], mesh_device, ttnn.bfloat16)
+
+
+def sdpa_configs(mesh_device):
+    """The M3 dense SDPA program / compute configs (minimax3_gqa_causal_perf tuning)."""
+    grid = mesh_device.compute_with_storage_grid_size()
+    prog = ttnn.SDPAProgramConfig(
+        compute_with_storage_grid_size=ttnn.CoreCoord(grid.x - 1, grid.y),
+        q_chunk_size=128,
+        k_chunk_size=512,
+        exp_approx_mode=False,
+    )
+    kcfg = ttnn.WormholeComputeKernelConfig(
+        math_fidelity=ttnn.MathFidelity.HiFi4, math_approx_mode=False, fp32_dest_acc_en=False, packer_l1_acc=False
+    )
+    return prog, kcfg
+
+
+def gather_chunk(out, kv_actual, mesh_device, chunk_local):
+    """Per-chip [1, NQ/tp, chunk_local, HD] block-cyclic over the chunk at kv_actual -> [1, NQ, chunk_global, HD] in
+    natural order: one composed host read (rows -> seq, cols -> heads), then undo the block-cyclic permutation."""
+    rows, cols = tuple(mesh_device.shape)
+    chunk_global = rows * chunk_local
+    full_bc = ttnn.to_torch(
+        out, mesh_composer=ttnn.ConcatMesh2dToTensor(mesh_device, mesh_shape=(rows, cols), dims=SHARD_DIMS)
+    ).float()
+    inv = torch.empty(chunk_global, dtype=torch.long)
+    inv[bc_index(kv_actual, rows, chunk_local) - kv_actual] = torch.arange(chunk_global)
+    return full_bc[:, :, inv, :]
 
 
 @parametrize_mesh_with_fabric(mesh_shapes=[(8, 4)], linear_fabric=True)
@@ -55,7 +117,7 @@ def test_ring_joint_cache_read_sp(mesh_device, device_params, n_chunks, chunk_lo
     """
     rows, cols = tuple(mesh_device.shape)
     assert (rows, cols) == (8, 4)
-    sp, tp, sp_axis, tp_axis = rows, cols, 0, 1
+    sp, sp_axis = rows, SP_AXIS
     C = chunk_local
     chunk_global = sp * C  # 256
     cache_global = n_chunks * chunk_global  # 512
@@ -73,28 +135,11 @@ def test_ring_joint_cache_read_sp(mesh_device, device_params, n_chunks, chunk_lo
     # --- write all chunks into the GQA chunked-KV cache (block-cyclic) ---
     cache_k = init_kvpe_cache(HEAD_DIM, mesh_device, cache_global, list(mesh_device.shape), sp_axis, 1)
     cache_v = init_kvpe_cache(HEAD_DIM, mesh_device, cache_global, list(mesh_device.shape), sp_axis, 1)
-    wr_dims = [None, None]
-    wr_dims[sp_axis], wr_dims[tp_axis] = 2, 1
-
-    def bc_index(kv_actual):
-        pos = rotated_chip_positions(kv_actual, sp, C)
-        return torch.tensor([pos[c][r] for c in range(sp) for r in range(C)], dtype=torch.long)
-
-    def make_chunk(src, kv_actual):
-        chunk = src[:, bc_index(kv_actual), :].reshape(1, NKV, chunk_global, HEAD_DIM)
-        return ttnn.from_torch(
-            chunk,
-            device=mesh_device,
-            dtype=ttnn.bfloat8_b,
-            layout=ttnn.TILE_LAYOUT,
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
-            mesh_mapper=ttnn.ShardTensor2dMesh(mesh_device, mesh_shape=(rows, cols), dims=wr_dims),
-        )
 
     def write(cache, src, kv_actual):
         ttnn.experimental.deepseek_prefill.update_padded_kv_cache(
             cache,
-            make_chunk(src, kv_actual),
+            make_kv_chunk(src, kv_actual, mesh_device, C),
             slot_idx=0,
             layer_idx=0,
             num_layers=1,
@@ -110,28 +155,8 @@ def test_ring_joint_cache_read_sp(mesh_device, device_params, n_chunks, chunk_lo
     ttnn.synchronize_device(mesh_device)
 
     # --- Q = the LAST chunk's queries, block-cyclic within that chunk, sharded (seq rows, heads cols) ---
-    last_idx = bc_index(kv_actual_last)  # global positions of the last chunk, block-cyclic
-    q_bc = q[:, :, last_idx, :]  # [1, NQ, chunk_global, HD]
-    q_dims = [None, None]
-    q_dims[sp_axis], q_dims[tp_axis] = 2, 1
-    tt_q = ttnn.from_torch(
-        q_bc,
-        device=mesh_device,
-        dtype=ttnn.bfloat16,
-        layout=ttnn.TILE_LAYOUT,
-        mesh_mapper=ttnn.ShardTensor2dMesh(mesh_device, mesh_shape=(rows, cols), dims=q_dims),
-    )
-
-    grid = mesh_device.compute_with_storage_grid_size()
-    prog = ttnn.SDPAProgramConfig(
-        compute_with_storage_grid_size=ttnn.CoreCoord(grid.x - 1, grid.y),
-        q_chunk_size=128,
-        k_chunk_size=512,
-        exp_approx_mode=False,  # Pavle's minimax3_gqa_causal_perf tuning
-    )
-    kcfg = ttnn.WormholeComputeKernelConfig(
-        math_fidelity=ttnn.MathFidelity.HiFi4, math_approx_mode=False, fp32_dest_acc_en=False, packer_l1_acc=False
-    )
+    tt_q = make_q_chunk(q, kv_actual_last, mesh_device, C)
+    prog, kcfg = sdpa_configs(mesh_device)
 
     # dense_sp_attention writes the LAST chunk into the cache, then ring_joint cache-read: K/V come
     # from the cache (kv_cache_batch_idx=slot 0); kv_actual_isl = prefix before the last chunk,
@@ -140,8 +165,8 @@ def test_ring_joint_cache_read_sp(mesh_device, device_params, n_chunks, chunk_lo
         tt_q,
         cache_k,
         cache_v,
-        make_chunk(k[0], kv_actual_last),
-        make_chunk(v[0], kv_actual_last),
+        make_kv_chunk(k[0], kv_actual_last, mesh_device, C),
+        make_kv_chunk(v[0], kv_actual_last, mesh_device, C),
         kv_actual=kv_actual_last,
         logical_n=cache_global,
         n_kv=NKV,
@@ -155,17 +180,7 @@ def test_ring_joint_cache_read_sp(mesh_device, device_params, n_chunks, chunk_lo
         cluster_axis=sp_axis,
     )
 
-    # out per chip [1, NQ/tp, C, HD], block-cyclic over the LAST chunk. Gather heads (cols) + seq (rows).
-    dts = ttnn.get_device_tensors(out)
-    row_t = []
-    for r in range(rows):
-        row_t.append(torch.cat([ttnn.to_torch(dts[r * cols + c]).float() for c in range(cols)], dim=1))  # [1,NQ,C,HD]
-    full_bc = torch.cat(row_t, dim=2)  # [1, NQ, chunk_global, HD] block-cyclic over the last chunk
-    # invert block-cyclic -> natural order WITHIN the last chunk (last_idx are global; subtract the offset)
-    local_pos = last_idx - kv_actual_last  # positions in [0, chunk_global)
-    inv = torch.empty(chunk_global, dtype=torch.long)
-    inv[local_pos] = torch.arange(chunk_global)
-    full = full_bc[:, :, inv, :]  # [1, NQ, chunk_global, HD] natural order (= positions kv_actual_last:cache_global)
+    full = gather_chunk(out, kv_actual_last, mesh_device, C)  # natural order over positions kv_actual_last:cache_global
 
     passing, pcc = comp_pcc(ref, full, 0.99)
     logger.info(f"ring_joint CACHE-READ SP=8 x TP=4 vs ref: pcc={pcc}")
