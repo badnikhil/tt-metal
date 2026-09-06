@@ -89,6 +89,14 @@ struct RingJointSDPAParams {
 
     bool has_indexed_kv_cache() const { return kv_cache_batch_idx.has_value(); }
 
+    // Cache batch on the host path: the same (user, layer)-major fold the readers apply to slot_id[0] on the
+    // metadata path, so both forms of the slot address one cache layout. Identity with the defaults (1, 0).
+    std::optional<std::uint32_t> cache_batch_idx() const {
+        return kv_cache_batch_idx.has_value()
+                   ? std::optional<std::uint32_t>(*kv_cache_batch_idx * kv_cache_num_layers + kv_cache_layer_idx)
+                   : std::nullopt;
+    }
+
     bool has_kv_pad_rotation() const { return kv_actual_isl.has_value(); }
 
     bool has_sliding_window() const { return sliding_window_size.value_or(0) > 0; }

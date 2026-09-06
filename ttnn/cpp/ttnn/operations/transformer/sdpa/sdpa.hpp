@@ -121,8 +121,9 @@ std::tuple<ttnn::Tensor, ttnn::Tensor, ttnn::Tensor> ring_joint_scaled_dot_produ
     // and the program hash does not key it here, so one program serves every chunk depth.
     const std::optional<ttnn::Tensor>& slot_id = std::nullopt,
     const std::optional<ttnn::Tensor>& kv_actual_isl_tensor = std::nullopt,
-    // (user, layer)-major KV-cache batch dim (metadata path only): the readers compute the cache slot
-    // on-device as slot_id[0] * kv_cache_num_layers + kv_cache_layer_idx (mirrors update_padded_kv_cache).
+    // (user, layer)-major KV-cache batch dim, both paths: the cache batch is slot * kv_cache_num_layers +
+    // kv_cache_layer_idx with slot = kv_cache_batch_idx (folded host-side) or slot_id[0] (on-device); mirrors
+    // update_padded_kv_cache. Identity with the defaults.
     // Resolve to 1/0 when nullopt -> slot = slot_id[0].
     std::optional<uint32_t> kv_cache_num_layers = std::nullopt,
     std::optional<uint32_t> kv_cache_layer_idx = std::nullopt);

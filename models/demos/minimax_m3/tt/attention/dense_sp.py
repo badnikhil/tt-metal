@@ -66,19 +66,13 @@ def dense_sp_attention(
     """
     if (slot_id is None) != (kv_actual_isl_tensor is None):
         raise ValueError("slot_id and kv_actual_isl_tensor must be passed together")
+    # The op folds the layer into the cache batch on both paths (slot * num_layers + layer_idx, the
+    # update_padded_kv_cache layout); only the slot's form differs: device tensors or host ints.
+    slot_kwargs = dict(kv_cache_num_layers=num_layers, kv_cache_layer_idx=layer_idx)
     if slot_id is not None:
-        slot_kwargs = dict(
-            slot_id=slot_id,
-            kv_actual_isl_tensor=kv_actual_isl_tensor,
-            kv_cache_num_layers=num_layers,
-            kv_cache_layer_idx=layer_idx,
-        )
+        slot_kwargs.update(slot_id=slot_id, kv_actual_isl_tensor=kv_actual_isl_tensor)
     else:
-        # Fold the layer into the cache batch index, matching update_padded_kv_cache's write
-        # (batch_idx = slot_idx*num_layers + layer_idx). The cache packs all layers user-major in the
-        # batch dim; passing slot_idx alone made every dense layer read layer 0's cache (L0 correct by
-        # coincidence, L1+ read stale L0 K/V -> wrong attn_out -> residual corruption -> KV-PCC crater).
-        slot_kwargs = dict(kv_cache_batch_idx=slot_idx * num_layers + layer_idx, kv_actual_isl=kv_actual)
+        slot_kwargs.update(kv_cache_batch_idx=slot_idx, kv_actual_isl=kv_actual)
 
     if write_chunk:
         for cache, chunk in ((cache_k, tt_k_chunk), (cache_v, tt_v_chunk)):

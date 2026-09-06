@@ -609,7 +609,7 @@ void apply_ring_joint_scalar_runtime_args(
     const RingWorkMasks& ring_work_masks = runtime_plan.ring_work_plan.masks;
     const RingJointRuntimeArgLayout layout = get_runtime_arg_layout(args, tensor_args);
     const uint32_t num_cores = layout.grid_size.x * layout.grid_size.y;
-    const uint32_t kv_cache_batch_idx = args.kv_cache_batch_idx.value_or(0);
+    const uint32_t kv_cache_batch_idx = args.cache_batch_idx().value_or(0);
 
     // Gather inputs (K, plus V when it isn't the latent-V alias of K). Shared by the indexed-slot
     // and valid-pages patches below.
@@ -1023,7 +1023,7 @@ tt::tt_metal::ProgramDescriptor build_ring_joint_sdpa_program_descriptor(
     const bool enable_kv_chains = !has_sliding_window;
     // The supported sliding specialization always uses a compact neighbor-halo buffer.
     const uint32_t padded_N = has_sliding_window ? global_padded_N : gathered_padded_N;
-    const uint32_t kv_cache_batch_idx = args.kv_cache_batch_idx.value_or(0);
+    const uint32_t kv_cache_batch_idx = args.cache_batch_idx().value_or(0);
     // L / L_local resolved once in resolve_ring_joint_input_params (full vs per-device joint seq).
     const uint32_t L = joint_input_params.L;
     const uint32_t L_local = joint_input_params.L_local;
@@ -2889,7 +2889,7 @@ tt::tt_metal::ProgramDescriptor build_ring_joint_sdpa_program_descriptor(
             all_gather_fused_op_signaler.value(),
             args.ccl_core_grid_offset,
             args.all_gather_operation_attributes.core_allocation_strategy,
-            args.kv_cache_batch_idx,
+            args.cache_batch_idx(),
             compute_gather_valid_Ht(args, tensor_args),
             neighbor_halo);
     } else {
@@ -2901,7 +2901,7 @@ tt::tt_metal::ProgramDescriptor build_ring_joint_sdpa_program_descriptor(
         // placeholder (0) to turn on single-slot structure; the AG reader recomputes the real offset.
         const bool ag_indexed = args.has_indexed_kv_cache() || tensor_args.has_metadata();
         const std::optional<uint32_t> gather_slice_idx =
-            ag_indexed ? std::optional<uint32_t>(args.kv_cache_batch_idx.value_or(0)) : std::nullopt;
+            ag_indexed ? std::optional<uint32_t>(args.cache_batch_idx().value_or(0)) : std::nullopt;
         ring_attention_all_gather_async_multi_core_with_workers_helper(
             desc,
             all_gather_input_tensors,

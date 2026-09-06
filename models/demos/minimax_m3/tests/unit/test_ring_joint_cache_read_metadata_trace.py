@@ -341,6 +341,15 @@ def test_ring_joint_cache_read_metadata_trace(
         direct_meta_call(kv_cache_layer_idx=NUM_LAYERS)
     with expect_error(RuntimeError, "kv_cache_num_layers must be >= 1"):
         direct_meta_call(kv_cache_num_layers=0)
+    # The fold is one formula on both paths, so the host form is bounded the same way.
+    with expect_error(RuntimeError, "kv_cache_layer_idx=.* must be < kv_cache_num_layers"):
+        direct_meta_call(
+            slot_id=None,
+            kv_actual_isl_tensor=None,
+            kv_cache_batch_idx=1,
+            kv_actual_isl=kv_actual_last,
+            kv_cache_layer_idx=NUM_LAYERS,
+        )
 
     tid = ttnn.begin_trace_capture(mesh_device, cq_id=0)
     out_tr = run_meta(t_slot, t_kv)

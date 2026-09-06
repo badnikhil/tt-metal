@@ -633,7 +633,8 @@ void bind_sdpa(nb::module_& mod) {
             is_causal (bool): Whether to use causal attention masking. Defaults to False.
             is_balanced (bool): Whether to use balanced attention computation. Defaults to False.
             is_cross (bool): Whether to use non-causal cross-attention (short Q, long K/V). Defaults to False.
-            kv_cache_batch_idx (int, optional): Selects the shared K/V cache batch slot when K and V are full caches.
+            kv_cache_batch_idx (int, optional): Selects the shared K/V cache slot when K and V are full caches; the
+                cache batch read is kv_cache_batch_idx * kv_cache_num_layers + kv_cache_layer_idx.
             kv_actual_isl (int, optional): Prior valid global KV length before this fixed-size chunk.
                 When passed, enables KV-pad-aware rotation and derives current valid tokens as
                 logical_n - kv_actual_isl.
@@ -655,10 +656,10 @@ void bind_sdpa(nb::module_& mod) {
                 together with kv_actual_isl_tensor. Defaults to None.
             kv_actual_isl_tensor (ttnn.Tensor, optional): Trace-safe metadata: same form, holding the prior
                 valid global KV length before this chunk. Defaults to None.
-            kv_cache_num_layers (int, optional): Metadata path only: layers per user in a (user, layer)-major
-                cache; the readers compute the cache slot as slot_id[0] * kv_cache_num_layers + kv_cache_layer_idx
-                (mirrors update_padded_kv_cache). Defaults to 1.
-            kv_cache_layer_idx (int, optional): Metadata path only: this call's layer. Defaults to 0.
+            kv_cache_num_layers (int, optional): Layers per user in a (user, layer)-major cache. On both paths
+                the cache batch is slot * kv_cache_num_layers + kv_cache_layer_idx, with slot = kv_cache_batch_idx
+                or slot_id[0] (mirrors update_padded_kv_cache). Defaults to 1.
+            kv_cache_layer_idx (int, optional): This call's layer in that fold. Defaults to 0.
 
         Chunked-prefill mode is entered implicitly when input_tensor_q's per-device seq
         length is less than input_tensor_k's (Q is the latest slab; K is the populated
@@ -755,7 +756,8 @@ void bind_sdpa(nb::module_& mod) {
             ccl_core_grid_offset (ttnn.CoreCoord): Core grid offset for CCL workers.
             use_column_major_ccl (bool): If true, allocate CCL workers column-major. Defaults to False.
             is_balanced (bool): Whether to use balanced causal work distribution. Defaults to False.
-            kv_cache_batch_idx (int, optional): Selects one batch slot from an indexed K/V cache. Defaults to None.
+            kv_cache_batch_idx (int, optional): Selects one slot from an indexed K/V cache; the cache batch read is
+                kv_cache_batch_idx * kv_cache_num_layers + kv_cache_layer_idx. Defaults to None.
             kv_actual_isl (int, optional): Prior valid global KV length before this fixed-size chunk.
                 When passed, enables KV-pad-aware rotation and derives current valid tokens as
                 logical_n - kv_actual_isl.
@@ -765,9 +767,10 @@ void bind_sdpa(nb::module_& mod) {
                 mix is rejected). logical_n is not part of the program hash on this path. Defaults to None.
             kv_actual_isl_tensor (ttnn.Tensor, optional): Trace-safe metadata: same form, holding the prior
                 valid global KV length before this chunk. Defaults to None.
-            kv_cache_num_layers (int, optional): Metadata path only: layers per user in a (user, layer)-major
-                cache; slot = slot_id[0] * kv_cache_num_layers + kv_cache_layer_idx. Defaults to 1.
-            kv_cache_layer_idx (int, optional): Metadata path only: this call's layer. Defaults to 0.
+            kv_cache_num_layers (int, optional): Layers per user in a (user, layer)-major cache. On both paths
+                the cache batch is slot * kv_cache_num_layers + kv_cache_layer_idx, with slot = kv_cache_batch_idx
+                or slot_id[0]. Defaults to 1.
+            kv_cache_layer_idx (int, optional): This call's layer in that fold. Defaults to 0.
 
         Returns:
             (ttnn.Tensor, ttnn.Tensor):
