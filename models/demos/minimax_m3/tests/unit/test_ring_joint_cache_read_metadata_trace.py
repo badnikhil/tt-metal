@@ -260,15 +260,10 @@ def test_ring_joint_cache_read_metadata_trace(
     with expect_error(RuntimeError, "metadata tensor slot_id must hold exactly one element"):
         run_meta(scalar([1, 1], ttnn.DRAM_MEMORY_CONFIG), t_kv)
 
-    # Direct op call with dense_sp's kwargs plus the metadata tensors, for the rejections below.
+    # Direct op call with dense_sp's kwargs plus the metadata tensors, for the rejections below; `extra`
+    # adds or overrides kwargs.
     def direct_meta_call(**extra):
-        return ttnn.transformer.ring_joint_scaled_dot_product_attention(
-            tt_q,
-            cache_k,
-            cache_v,
-            None,
-            None,
-            None,
+        kwargs = dict(
             persistent_output_buffer_k=ccl.get_ring_gather_buffer(
                 "dense_k", NKV, cache_global, HEAD_DIM, ttnn.bfloat8_b
             ),
@@ -293,7 +288,10 @@ def test_ring_joint_cache_read_metadata_trace(
             kv_actual_isl_tensor=t_kv,
             kv_cache_num_layers=NUM_LAYERS,
             kv_cache_layer_idx=LAYER_IDX,
-            **extra,
+        )
+        kwargs.update(extra)
+        return ttnn.transformer.ring_joint_scaled_dot_product_attention(
+            tt_q, cache_k, cache_v, None, None, None, **kwargs
         )
 
     # KV-pad rotation is implied by metadata on chunked shapes, so its preconditions must be enforced on this
@@ -304,6 +302,13 @@ def test_ring_joint_cache_read_metadata_trace(
     # A host scalar next to the tensors would still steer the all-gather extent, so the mix is refused.
     with expect_error(RuntimeError, "metadata tensors replace the host"):
         direct_meta_call(kv_actual_isl=kv_actual_last)
+
+    # The readers turn slot_id[0] * kv_cache_num_layers + kv_cache_layer_idx into a DRAM offset unchecked, so
+    # the two host factors are bounded here: a layer index past the fold would read the next user's slot.
+    with expect_error(RuntimeError, "kv_cache_layer_idx=.* must be < kv_cache_num_layers"):
+        direct_meta_call(kv_cache_layer_idx=NUM_LAYERS)
+    with expect_error(RuntimeError, "kv_cache_num_layers must be >= 1"):
+        direct_meta_call(kv_cache_num_layers=0)
 
     tid = ttnn.begin_trace_capture(mesh_device, cq_id=0)
     out_tr = run_meta(t_slot, t_kv)

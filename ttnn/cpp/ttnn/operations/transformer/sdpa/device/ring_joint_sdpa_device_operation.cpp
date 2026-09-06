@@ -258,6 +258,23 @@ void validate_runtime_patched_scalars(const RingJointSDPAParams& args, const Rin
         };
         validate_meta(tensor_args.slot_id.value(), "slot_id");
         validate_meta(tensor_args.kv_actual_isl.value(), "kv_actual_isl");
+        // The readers form the cache batch as slot_id[0] * kv_cache_num_layers + kv_cache_layer_idx and use it
+        // as a DRAM offset unchecked; slot_id[0] is only knowable on device, but the two host factors are not.
+        const auto K_cache_batch = tensor_args.input_k.logical_shape()[0];
+        const auto V_cache_batch =
+            tensor_args.input_v.has_value() ? tensor_args.input_v->logical_shape()[0] : K_cache_batch;
+        TT_FATAL(args.kv_cache_num_layers >= 1, "kv_cache_num_layers must be >= 1 on the metadata path");
+        TT_FATAL(
+            args.kv_cache_layer_idx < args.kv_cache_num_layers,
+            "kv_cache_layer_idx={} must be < kv_cache_num_layers={}",
+            args.kv_cache_layer_idx,
+            args.kv_cache_num_layers);
+        TT_FATAL(
+            args.kv_cache_num_layers <= K_cache_batch && args.kv_cache_num_layers <= V_cache_batch,
+            "kv_cache_num_layers={} exceeds the KV cache batch (K={}, V={})",
+            args.kv_cache_num_layers,
+            K_cache_batch,
+            V_cache_batch);
     }
     if (args.has_indexed_kv_cache()) {
         const auto K_cache_batch = tensor_args.input_k.logical_shape()[0];
