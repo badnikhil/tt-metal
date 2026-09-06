@@ -226,6 +226,13 @@ void validate_runtime_patched_scalars(const RingJointSDPAParams& args, const Rin
     TT_FATAL(
         tensor_args.slot_id.has_value() == tensor_args.kv_actual_isl.has_value(),
         "metadata tensors slot_id and kv_actual_isl must be supplied together, or neither supplied");
+    // The host scalars still reach the program when both forms are given: the fused all-gather bounds its
+    // extent by the smaller of the host logical_n and the on-device kv_actual_isl, while the SDPA readers
+    // follow the tensors alone, so a host value below the tensor's leaves SDPA reading pages the gather
+    // never wrote. Refuse the mix instead of picking a winner.
+    TT_FATAL(
+        !(tensor_args.has_metadata() && (args.kv_cache_batch_idx.has_value() || args.kv_actual_isl.has_value())),
+        "metadata tensors replace the host kv_cache_batch_idx / kv_actual_isl; pass one form, not both");
     if (tensor_args.has_metadata()) {
         // The kernels fetch element [0] of each tensor at start through a TensorAccessor whose bank table is
         // baked into the compile-time args from the FIRST call; the hash keys only has_metadata() and the

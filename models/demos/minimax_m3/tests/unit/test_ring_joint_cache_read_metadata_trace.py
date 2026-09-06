@@ -224,10 +224,9 @@ def test_ring_joint_cache_read_metadata_trace(
     with expect_error(RuntimeError, "metadata tensor slot_id must hold exactly one element"):
         run_meta(scalar([1, 1], ttnn.DRAM_MEMORY_CONFIG), t_kv)
 
-    # KV-pad rotation is implied by metadata on chunked shapes, so its preconditions must be enforced on this
-    # path too; zigzag balancing is one of them.
-    with expect_error(RuntimeError, "balanced"):
-        ttnn.transformer.ring_joint_scaled_dot_product_attention(
+    # Direct op call with dense_sp's kwargs plus the metadata tensors, for the rejections below.
+    def direct_meta_call(**extra):
+        return ttnn.transformer.ring_joint_scaled_dot_product_attention(
             tt_q,
             cache_k,
             cache_v,
@@ -253,13 +252,22 @@ def test_ring_joint_cache_read_metadata_trace(
             ccl_core_grid_offset=ccl.ring_attention_ccl_core_grid_offset,
             use_column_major_ccl=True,
             is_causal=True,
-            is_balanced=True,
             scale=HEAD_DIM**-0.5,
             slot_id=t_slot,
             kv_actual_isl_tensor=t_kv,
             kv_cache_num_layers=NUM_LAYERS,
             kv_cache_layer_idx=LAYER_IDX,
+            **extra,
         )
+
+    # KV-pad rotation is implied by metadata on chunked shapes, so its preconditions must be enforced on this
+    # path too; zigzag balancing is one of them.
+    with expect_error(RuntimeError, "balanced"):
+        direct_meta_call(is_balanced=True)
+
+    # A host scalar next to the tensors would still steer the all-gather extent, so the mix is refused.
+    with expect_error(RuntimeError, "metadata tensors replace the host"):
+        direct_meta_call(kv_actual_isl=kv_actual_last)
 
     tid = ttnn.begin_trace_capture(mesh_device, cq_id=0)
     out_tr = run_meta(t_slot, t_kv)
