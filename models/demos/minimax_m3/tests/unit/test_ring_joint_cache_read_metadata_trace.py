@@ -52,7 +52,9 @@ def _host_scalar(val):
     [(2, 32), (2, 640)],  # 2x256 (quick) and 2x5120 — the REAL M3 prefill chunk (640/chip at SP=8)
     ids=["2x256", "2x5120"],
 )
-def test_ring_joint_cache_read_metadata_trace(mesh_device, device_params, n_chunks, chunk_local, reset_seeds):
+def test_ring_joint_cache_read_metadata_trace(
+    mesh_device, device_params, expect_error, n_chunks, chunk_local, reset_seeds
+):
     rows, cols = tuple(mesh_device.shape)
     assert (rows, cols) == (8, 4)
     sp, sp_axis, tp_axis = rows, 0, 1
@@ -203,6 +205,24 @@ def test_ring_joint_cache_read_metadata_trace(mesh_device, device_params, n_chun
         f"cached program did not follow fresh metadata tensors: max_abs vs user 1={(meta1 - host[1]).abs().max()}, "
         f"pcc_vs_user0={comp_pcc(host[0], meta1, 0.0)[1]}"
     )
+
+    # The program bakes a DRAM-interleaved single-page accessor for each metadata tensor and the hash never sees
+    # the tensor itself, so a scalar of another form must be refused on a cache hit as well: an L1 scalar (a
+    # different memory config) and a two-element DRAM scalar (same memory config, so a genuine hit).
+    def scalar(values, memory_config):
+        return ttnn.from_torch(
+            torch.tensor(values, dtype=torch.int64).reshape(1, 1, 1, len(values)),
+            device=mesh_device,
+            dtype=ttnn.uint32,
+            layout=ttnn.ROW_MAJOR_LAYOUT,
+            memory_config=memory_config,
+            mesh_mapper=ttnn.ReplicateTensorToMesh(mesh_device),
+        )
+
+    with expect_error(RuntimeError, "metadata tensor slot_id must be in DRAM"):
+        run_meta(scalar([1], ttnn.L1_MEMORY_CONFIG), t_kv)
+    with expect_error(RuntimeError, "metadata tensor slot_id must hold exactly one element"):
+        run_meta(scalar([1, 1], ttnn.DRAM_MEMORY_CONFIG), t_kv)
 
     tid = ttnn.begin_trace_capture(mesh_device, cq_id=0)
     out_tr = run_meta(t_slot, t_kv)

@@ -223,6 +223,35 @@ void validate_ring_joint_all_gather_on_program_cache_miss(
 // rotation). Everything else is keyed by the hash, so a cache hit guarantees it already passed at miss
 // time. Shared by validate_on_program_cache_miss and validate_on_program_cache_hit to avoid divergence.
 void validate_runtime_patched_scalars(const RingJointSDPAParams& args, const RingJointSDPAInputs& tensor_args) {
+    TT_FATAL(
+        tensor_args.slot_id.has_value() == tensor_args.kv_actual_isl.has_value(),
+        "metadata tensors slot_id and kv_actual_isl must be supplied together, or neither supplied");
+    if (tensor_args.has_metadata()) {
+        // The kernels fetch element [0] of each tensor at start through a TensorAccessor whose bank table is
+        // baked into the compile-time args from the FIRST call; the hash keys only has_metadata() and the
+        // memory config, not the tensor. So every call, hit or miss, must pin the form that accessor assumes
+        // (DRAM interleaved, one uint32 element): anything else is read as garbage on-device, no error.
+        const auto& input_q = tensor_args.input_q;
+        auto validate_meta = [&input_q](const Tensor& meta, const char* name) {
+            TT_FATAL(meta.storage_type() == StorageType::DEVICE, "metadata tensor {} must be on device", name);
+            TT_FATAL(meta.buffer() != nullptr, "metadata tensor {} must be allocated on device", name);
+            TT_FATAL(meta.dtype() == DataType::UINT32, "metadata tensor {} must be UINT32", name);
+            TT_FATAL(meta.layout() == Layout::ROW_MAJOR, "metadata tensor {} must be ROW_MAJOR", name);
+            TT_FATAL(
+                meta.logical_volume() == 1,
+                "metadata tensor {} must hold exactly one element, got {}",
+                name,
+                meta.logical_volume());
+            TT_FATAL(!meta.is_sharded(), "metadata tensor {} must not be sharded", name);
+            TT_FATAL(
+                meta.buffer()->buffer_type() == tt::tt_metal::BufferType::DRAM,
+                "metadata tensor {} must be in DRAM",
+                name);
+            TT_FATAL(meta.device() == input_q.device(), "metadata tensor {} must be on the same device as Q", name);
+        };
+        validate_meta(tensor_args.slot_id.value(), "slot_id");
+        validate_meta(tensor_args.kv_actual_isl.value(), "kv_actual_isl");
+    }
     if (args.has_indexed_kv_cache()) {
         const auto K_cache_batch = tensor_args.input_k.logical_shape()[0];
         const auto V_cache_batch =
@@ -357,27 +386,8 @@ void RingJointSDPADeviceOperation::validate_on_program_cache_miss(
         tensor_args.joint_q.has_value() == has_joint_tensors && tensor_args.joint_k.has_value() == has_joint_tensors &&
             tensor_args.joint_v.has_value() == has_joint_tensors,
         "Joint tensors must be provided all together or omitted altogether");
-    TT_FATAL(
-        tensor_args.slot_id.has_value() == tensor_args.kv_actual_isl.has_value(),
-        "metadata tensors slot_id and kv_actual_isl must be supplied together, or neither supplied");
-    if (tensor_args.has_metadata()) {
-        // The readers fetch element [0] of each tensor through a TensorAccessor at kernel start; a tensor of
-        // another dtype, layout, size or device is read as garbage on-device, so reject it here instead.
-        auto validate_meta = [&input_tensor_q](const Tensor& meta, const char* name) {
-            TT_FATAL(meta.storage_type() == StorageType::DEVICE, "metadata tensor {} must be on device", name);
-            TT_FATAL(meta.dtype() == DataType::UINT32, "metadata tensor {} must be UINT32", name);
-            TT_FATAL(meta.layout() == Layout::ROW_MAJOR, "metadata tensor {} must be ROW_MAJOR", name);
-            TT_FATAL(
-                meta.logical_volume() == 1,
-                "metadata tensor {} must hold exactly one element, got {}",
-                name,
-                meta.logical_volume());
-            TT_FATAL(
-                meta.device() == input_tensor_q.device(), "metadata tensor {} must be on the same device as Q", name);
-        };
-        validate_meta(tensor_args.slot_id.value(), "slot_id");
-        validate_meta(tensor_args.kv_actual_isl.value(), "kv_actual_isl");
-    }
+    // Metadata tensors (slot_id / kv_actual_isl) are checked in validate_runtime_patched_scalars, which runs on
+    // cache hits too — the hash does not key on them.
 
     if (tensor_args.attention_sink.has_value()) {
         const auto& attention_sink = tensor_args.attention_sink.value();
@@ -996,6 +1006,11 @@ ttsl::hash::hash_t RingJointSDPADeviceOperation::compute_program_hash(
         args.kv_cache_batch_idx.has_value(),
         kv_pad_rotation_enabled,
         tensor_args.has_metadata(),
+        // The reader/writer bake a TensorAccessorArgs per metadata tensor into their compile-time args, so a
+        // different memory config needs its own program; only the config is keyed, never the value.
+        tensor_args.slot_id.has_value() ? tensor_args.slot_id->memory_config() : tt::tt_metal::MemoryConfig{},
+        tensor_args.kv_actual_isl.has_value() ? tensor_args.kv_actual_isl->memory_config()
+                                              : tt::tt_metal::MemoryConfig{},
         args.kv_cache_num_layers,
         args.kv_cache_layer_idx,
         tensor_args.has_latent_v(),
