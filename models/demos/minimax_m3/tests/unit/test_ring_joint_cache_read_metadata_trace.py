@@ -224,6 +224,43 @@ def test_ring_joint_cache_read_metadata_trace(
     with expect_error(RuntimeError, "metadata tensor slot_id must hold exactly one element"):
         run_meta(scalar([1, 1], ttnn.DRAM_MEMORY_CONFIG), t_kv)
 
+    # KV-pad rotation is implied by metadata on chunked shapes, so its preconditions must be enforced on this
+    # path too; zigzag balancing is one of them.
+    with expect_error(RuntimeError, "balanced"):
+        ttnn.transformer.ring_joint_scaled_dot_product_attention(
+            tt_q,
+            cache_k,
+            cache_v,
+            None,
+            None,
+            None,
+            persistent_output_buffer_k=ccl.get_ring_gather_buffer(
+                "dense_k", NKV, cache_global, HEAD_DIM, ttnn.bfloat8_b
+            ),
+            persistent_output_buffer_v=ccl.get_ring_gather_buffer(
+                "dense_v", NKV, cache_global, HEAD_DIM, ttnn.bfloat8_b
+            ),
+            joint_strategy="rear",
+            logical_n=cache_global,
+            program_config=prog,
+            compute_kernel_config=kcfg,
+            dim=2,
+            multi_device_global_semaphore=ccl.ring_attention_ccl_semaphore_handles,
+            num_links=ccl.num_links,
+            cluster_axis=sp_axis,
+            mesh_device=mesh_device,
+            topology=ttnn.Topology.Linear,
+            ccl_core_grid_offset=ccl.ring_attention_ccl_core_grid_offset,
+            use_column_major_ccl=True,
+            is_causal=True,
+            is_balanced=True,
+            scale=HEAD_DIM**-0.5,
+            slot_id=t_slot,
+            kv_actual_isl_tensor=t_kv,
+            kv_cache_num_layers=NUM_LAYERS,
+            kv_cache_layer_idx=LAYER_IDX,
+        )
+
     tid = ttnn.begin_trace_capture(mesh_device, cq_id=0)
     out_tr = run_meta(t_slot, t_kv)
     ttnn.end_trace_capture(mesh_device, tid, cq_id=0)

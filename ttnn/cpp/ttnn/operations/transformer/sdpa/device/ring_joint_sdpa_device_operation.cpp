@@ -513,7 +513,10 @@ void RingJointSDPADeviceOperation::validate_on_program_cache_miss(
 
     auto q_chunk_size = args.get_q_chunk_size();
     auto k_chunk_size = args.get_k_chunk_size();
-    const bool has_kv_pad_rotation = args.has_kv_pad_rotation();
+    // Same rule as the factory's kv_pad_from_metadata: the metadata path turns KV-pad rotation on for any
+    // chunked call, so its shape/flag preconditions below must be checked for it as well, not only when the
+    // host kv_actual_isl is set.
+    const bool has_kv_pad_rotation = args.has_kv_pad_rotation() || (tensor_args.has_metadata() && is_chunked);
 
     if (ag.full_mesh) {
         TT_FATAL(
@@ -810,7 +813,9 @@ void RingJointSDPADeviceOperation::validate_on_program_cache_miss(
         TT_FATAL(!args.is_balanced, "sharded joint is incompatible with is_balanced (zigzag)");
         TT_FATAL(!args.is_cross, "sharded joint is incompatible with is_cross");
         TT_FATAL(!args.kv_cache_batch_idx.has_value(), "sharded joint is incompatible with indexed KV cache");
-        TT_FATAL(!args.kv_actual_isl.has_value(), "sharded joint is incompatible with KV-pad rotation");
+        TT_FATAL(
+            !has_kv_pad_rotation,
+            "sharded joint is incompatible with KV-pad rotation (host kv_actual_isl or metadata)");
 
         // Page-size parity: joint K/V are appended to the same fused all-gather list as spatial K/V.
         // The AG validator enforces uniform page size; assert explicitly for a clear error on divergence.
