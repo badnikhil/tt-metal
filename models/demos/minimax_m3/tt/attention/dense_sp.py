@@ -59,9 +59,9 @@ def dense_sp_attention(
                       trace-safe path: 1-element uint32 device scalars holding the user slot and kv_actual,
                       read by the kernels at start, so a captured trace re-targets them in place between
                       replays. Both or neither. The chunk write (write_chunk) and the read both take them;
-                      the host slot_idx / kv_actual are then NOT passed to either op (a host kv_actual_isl
-                      would re-enable per-dispatch host patching) and logical_n is a placeholder
-                      (cache_global): the kernels derive the real length as kv_actual_isl[0] + chunk.
+                      the host slot_idx / kv_actual are then NOT passed to either op (the op rejects the mix).
+                      logical_n passes through as the real length; the kernels derive it on-device as
+                      kv_actual_isl[0] + chunk and the op leaves it out of the program hash on this path.
     -> out            [1, n_q_local, chunk_local, head_dim]    block-cyclic over the chunk
     """
     if (slot_id is None) != (kv_actual_isl_tensor is None):
@@ -73,7 +73,6 @@ def dense_sp_attention(
             kv_cache_num_layers=num_layers,
             kv_cache_layer_idx=layer_idx,
         )
-        logical_n = cache_global
     else:
         # Fold the layer into the cache batch index, matching update_padded_kv_cache's write
         # (batch_idx = slot_idx*num_layers + layer_idx). The cache packs all layers user-major in the

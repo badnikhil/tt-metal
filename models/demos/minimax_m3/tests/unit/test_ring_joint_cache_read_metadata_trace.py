@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: © 2026 Tenstorrent USA, Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-"""ring_joint cache-read through the trace-safe metadata path: bit-exact vs the host-int path, a cached program
-follows freshly allocated metadata tensors, the helper's chunk write lands in the tensor-selected slot, and one
-captured trace re-targets the cache-user slot by rewriting the metadata tensors between replays.
+"""ring_joint cache-read through the trace-safe metadata path: bit-exact vs the host-int path at two chunk depths
+served by ONE cached program (the real logical_n is off the hash), a cached program follows freshly allocated
+metadata tensors, the helper's chunk write lands in the tensor-selected slot, and one captured trace re-targets the
+cache-user slot by rewriting the metadata tensors between replays.
 
 Extends test_ring_joint_cache_read_sp_vs_ref to two users and two layers so the on-device slot fold
 (slot_id[0] * kv_cache_num_layers + kv_cache_layer_idx) is exercised, not just slot 0 / layer 0. Both users hold
@@ -112,16 +113,19 @@ def test_ring_joint_cache_read_metadata_trace(
                 )
     ttnn.synchronize_device(mesh_device)
 
-    last_idx = bc_index(kv_actual_last)
     q_dims = [None, None]
     q_dims[sp_axis], q_dims[tp_axis] = 2, 1
-    tt_q = ttnn.from_torch(
-        q[:, :, last_idx, :],
-        device=mesh_device,
-        dtype=ttnn.bfloat16,
-        layout=ttnn.TILE_LAYOUT,
-        mesh_mapper=ttnn.ShardTensor2dMesh(mesh_device, mesh_shape=(rows, cols), dims=q_dims),
-    )
+
+    def make_q(kv_actual):
+        return ttnn.from_torch(
+            q[:, :, bc_index(kv_actual), :],
+            device=mesh_device,
+            dtype=ttnn.bfloat16,
+            layout=ttnn.TILE_LAYOUT,
+            mesh_mapper=ttnn.ShardTensor2dMesh(mesh_device, mesh_shape=(rows, cols), dims=q_dims),
+        )
+
+    tt_q = make_q(kv_actual_last)
     grid = mesh_device.compute_with_storage_grid_size()
     prog = ttnn.SDPAProgramConfig(
         compute_with_storage_grid_size=ttnn.CoreCoord(grid.x - 1, grid.y),
@@ -147,22 +151,30 @@ def test_ring_joint_cache_read_metadata_trace(
         write_chunk=False,
     )
 
-    def gather(out):
-        # per chip [1, NQ/tp, C, HD] block-cyclic over the last chunk -> [1, NQ, chunk_global, HD] natural order
+    def gather(out, kv_actual=kv_actual_last):
+        # per chip [1, NQ/tp, C, HD] block-cyclic over the chunk at kv_actual -> [1, NQ, chunk_global, HD] natural
         dts = ttnn.get_device_tensors(out)
         full_bc = torch.cat(
             [torch.cat([ttnn.to_torch(dts[r * cols + c]).float() for c in range(cols)], dim=1) for r in range(rows)],
             dim=2,
         )
         inv = torch.empty(chunk_global, dtype=torch.long)
-        inv[last_idx - kv_actual_last] = torch.arange(chunk_global)
+        inv[bc_index(kv_actual) - kv_actual] = torch.arange(chunk_global)
         return full_bc[:, :, inv, :]
 
-    def run_host(u):
+    def run_host(u, q_t=tt_q, kv_actual=kv_actual_last):
         out = dense_sp_attention(
-            tt_q, cache_k, cache_v, None, None, kv_actual=kv_actual_last, logical_n=cache_global, slot_idx=u, **common
+            q_t,
+            cache_k,
+            cache_v,
+            None,
+            None,
+            kv_actual=kv_actual,
+            logical_n=kv_actual + chunk_global,
+            slot_idx=u,
+            **common,
         )
-        return gather(out)
+        return gather(out, kv_actual)
 
     host = [run_host(u) for u in range(NUM_USERS)]
     for u in range(NUM_USERS):
@@ -175,25 +187,45 @@ def test_ring_joint_cache_read_metadata_trace(
     t_slot = _meta_scalar(0, mesh_device)
     t_kv = _meta_scalar(kv_actual_last, mesh_device)
 
-    def run_meta(slot_t, kv_t):
+    def run_meta(slot_t, kv_t, q_t=tt_q, kv_actual=kv_actual_last):
         return dense_sp_attention(
-            tt_q,
+            q_t,
             cache_k,
             cache_v,
             None,
             None,
-            kv_actual=kv_actual_last,
-            logical_n=cache_global,
+            kv_actual=kv_actual,
+            logical_n=kv_actual + chunk_global,
             slot_id=slot_t,
             kv_actual_isl_tensor=kv_t,
             **common,
         )
 
-    # Eager metadata call: bit-exact with the host-int path, and it warms the program + ring-gather buffers.
+    # Depth 0 first, with the real (one-chunk) logical_n: this creates the metadata program. Depth 1 then has to
+    # be a program-cache HIT that still gathers and attends over the full two-chunk prefix -- the kernels take the
+    # length from kv_actual_isl[0], and nothing on the host may have bounded the program by the depth-0 logical_n.
+    tt_q0 = make_q(0)
+    host0 = run_host(0, tt_q0, 0)
+    passing, pcc = comp_pcc(
+        _torch_gqa_causal(q.float(), k[0].float(), v[0].float())[:, :, :chunk_global, :], host0, 0.99
+    )
+    assert passing, f"host-int cache-read PCC fail for user 0 at depth 0: {pcc}"
+    entries_before = mesh_device.num_program_cache_entries()
+    meta0_d0 = gather(run_meta(t_slot, _meta_scalar(0, mesh_device), tt_q0, 0), 0)
+    assert torch.equal(
+        meta0_d0, host0
+    ), f"metadata path != host-int path for user 0 at depth 0: max_abs={(meta0_d0 - host0).abs().max()}"
+    entries_d0 = mesh_device.num_program_cache_entries()
+    assert entries_d0 > entries_before, "depth-0 metadata call did not create a program (test setup)"
+
+    # Eager metadata call at depth 1: bit-exact with the host-int path, and it warms the ring-gather buffers.
     meta0 = gather(run_meta(t_slot, t_kv))
     assert torch.equal(
         meta0, host[0]
     ), f"metadata path != host-int path for user 0: max_abs={(meta0 - host[0]).abs().max()}"
+    assert (
+        mesh_device.num_program_cache_entries() == entries_d0
+    ), "depth 1 compiled a new program: logical_n is still part of the hash on the metadata path"
 
     # A caller may hand over freshly allocated metadata tensors on a later call (e.g. one kv_actual scalar per
     # depth). That call hits the cached program, whose kernels hold the tensors' DRAM addresses as plain

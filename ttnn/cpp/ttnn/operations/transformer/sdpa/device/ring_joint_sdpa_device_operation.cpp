@@ -412,6 +412,10 @@ void RingJointSDPADeviceOperation::validate_on_program_cache_miss(
         "Joint tensors must be provided all together or omitted altogether");
     // Metadata tensors (slot_id / kv_actual_isl) are checked in validate_runtime_patched_scalars, which runs on
     // cache hits too — the hash does not key on them.
+    TT_FATAL(
+        !(tensor_args.has_metadata() && args.has_sliding_window()),
+        "sliding window is not supported on the metadata path: the compact halo layout is derived from the host "
+        "logical_n, which this path neither hashes nor reads on-device");
 
     if (tensor_args.attention_sink.has_value()) {
         const auto& attention_sink = tensor_args.attention_sink.value();
@@ -537,10 +541,7 @@ void RingJointSDPADeviceOperation::validate_on_program_cache_miss(
 
     auto q_chunk_size = args.get_q_chunk_size();
     auto k_chunk_size = args.get_k_chunk_size();
-    // Same rule as the factory's kv_pad_from_metadata: the metadata path turns KV-pad rotation on for any
-    // chunked call, so its shape/flag preconditions below must be checked for it as well, not only when the
-    // host kv_actual_isl is set.
-    const bool has_kv_pad_rotation = args.has_kv_pad_rotation() || (tensor_args.has_metadata() && is_chunked);
+    const bool has_kv_pad_rotation = kv_pad_rotation_active(args, tensor_args);
 
     if (ag.full_mesh) {
         TT_FATAL(
@@ -996,7 +997,9 @@ RingJointSDPAResult RingJointSDPADeviceOperation::create_output_tensors(
 
 ttsl::hash::hash_t RingJointSDPADeviceOperation::compute_program_hash(
     const RingJointSDPAParams& args, const RingJointSDPAInputs& tensor_args) {
-    const bool kv_pad_rotation_enabled = args.has_kv_pad_rotation();
+    // Under KV-pad rotation the kernels take the length from kv_actual_isl (host-patched or read on-device),
+    // so logical_n leaves the key and one program serves every chunk depth on both paths.
+    const bool kv_pad_rotation_enabled = kv_pad_rotation_active(args, tensor_args);
     const auto cache_key_logical_n = kv_pad_rotation_enabled ? 0 : args.logical_n;
 
     std::vector<Tensor> input_tensors = {tensor_args.input_q, tensor_args.input_k};

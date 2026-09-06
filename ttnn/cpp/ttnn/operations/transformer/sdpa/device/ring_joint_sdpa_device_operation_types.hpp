@@ -99,14 +99,14 @@ struct RingJointSDPAParams {
         "is_causal",
         "is_balanced",
         "is_cross",
-        "cache_key_logical_n",
+        "logical_n",
         "logical_l",
         "ring_size",
         "compute_kernel_config",
         "program_config",
         "ccl_core_grid_offset",
         "has_kv_cache_batch_idx",
-        "kv_pad_rotation_enabled",
+        "host_kv_pad_rotation",
         "latent_v_head_dim",
         "sliding_window_size",
         "all_gather_operation_attributes",
@@ -118,7 +118,8 @@ struct RingJointSDPAParams {
             std::cref(is_causal),
             std::cref(is_balanced),
             std::cref(is_cross),
-            has_kv_pad_rotation() ? std::size_t{0} : logical_n,
+            // Reflection only; the program hash is computed explicitly (kv_pad_rotation_active needs the tensors).
+            std::cref(logical_n),
             std::cref(logical_l),
             std::cref(ring_size),
             std::cref(compute_kernel_config),
@@ -184,6 +185,13 @@ struct RingJointSDPAInputs {
     // Derived from buffer presence so the flag and the buffer cannot drift out of sync.
     bool joint_is_sharded() const { return gathered_joint_k.has_value(); }
 };
+
+// KV-pad rotation is on when the host passes kv_actual_isl, or when the chunked metadata path derives it
+// on-device. Every host decision that hangs off the rotation mode (program hash, compile-time zeroing,
+// validation, the all-gather extent) goes through this one rule so they cannot disagree.
+inline bool kv_pad_rotation_active(const RingJointSDPAParams& args, const RingJointSDPAInputs& tensor_args) {
+    return args.has_kv_pad_rotation() || (tensor_args.has_metadata() && tensor_args.is_chunked());
+}
 
 // Index constants for RingJointSDPAResult vector
 constexpr size_t RING_JOINT_SDPA_OUTPUT_IDX = 0;

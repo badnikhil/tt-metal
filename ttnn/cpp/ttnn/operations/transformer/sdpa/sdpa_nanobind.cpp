@@ -674,8 +674,9 @@ void bind_sdpa(nb::module_& mod) {
         Metadata (trace-safe) path: pass slot_id and kv_actual_isl_tensor instead of the host
         kv_cache_batch_idx / kv_actual_isl (omit both host scalars). The cache slot and the prior
         valid length are then read on-device at kernel start, so a captured trace re-targets them by
-        updating the two tensors in place between replays; logical_n becomes a placeholder equal to
-        the gathered capacity (every kernel derives the real length as kv_actual_isl[0] + chunk).
+        updating the two tensors in place between replays. logical_n stays the real total valid length:
+        the kernels derive it on-device as kv_actual_isl[0] + chunk and the program hash does not key it
+        on this path, so one program serves every chunk depth.
 
         Returns:
             (ttnn.Tensor, ttnn.Tensor, ttnn.Tensor):
@@ -760,8 +761,8 @@ void bind_sdpa(nb::module_& mod) {
                 logical_n - kv_actual_isl.
             slot_id (ttnn.Tensor, optional): Trace-safe metadata: 1-element uint32 ROW_MAJOR DRAM tensor
                 (replicated across the mesh) holding the cache-user slot, read on-device. Must be passed
-                together with kv_actual_isl_tensor; omit the host kv_cache_batch_idx / kv_actual_isl and pass
-                logical_n as the gathered capacity. Defaults to None.
+                together with kv_actual_isl_tensor; omit the host kv_cache_batch_idx / kv_actual_isl (the
+                mix is rejected). logical_n is not part of the program hash on this path. Defaults to None.
             kv_actual_isl_tensor (ttnn.Tensor, optional): Trace-safe metadata: same form, holding the prior
                 valid global KV length before this chunk. Defaults to None.
             kv_cache_num_layers (int, optional): Metadata path only: layers per user in a (user, layer)-major

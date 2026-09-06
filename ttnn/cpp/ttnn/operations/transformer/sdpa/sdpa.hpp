@@ -116,8 +116,9 @@ std::tuple<ttnn::Tensor, ttnn::Tensor, ttnn::Tensor> ring_joint_scaled_dot_produ
     // scalars (kv_cache_batch_idx / kv_actual_isl / logical_n) are read on-device from these two 1-element
     // uint32 DRAM tensors instead of being baked into the program, so one captured ttnn trace replays across
     // chunks and cache-user slots. slot_id holds the cache-user slot; kv_actual_isl_tensor the prior valid
-    // global KV length. Omit the host kv_cache_batch_idx / kv_actual_isl on this path; logical_n is then a
-    // placeholder (the gathered capacity) — every kernel derives the real length on-device.
+    // global KV length. Omit the host kv_cache_batch_idx / kv_actual_isl on this path (the mix is rejected).
+    // logical_n stays the real total valid length: every kernel derives it on-device as kv_actual_isl[0] + chunk
+    // and the program hash does not key it here, so one program serves every chunk depth.
     const std::optional<ttnn::Tensor>& slot_id = std::nullopt,
     const std::optional<ttnn::Tensor>& kv_actual_isl_tensor = std::nullopt,
     // (user, layer)-major KV-cache batch dim (metadata path only): the readers compute the cache slot
