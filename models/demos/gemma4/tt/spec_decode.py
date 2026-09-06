@@ -157,7 +157,15 @@ class SpeculativeDecoder:
         self._mapper = target_model._replicate_to_mesh_mapper()
         self._tp = target_model.mesh_config.tp if target_model.mesh_config else 1
         # The drafter cross-attends to the target's last full / last sliding KV.
-        self._shared_kv = target_model.get_shared_kv_caches()
+        # Build shared_kv from the KV cache ACTUALLY PASSED to this decoder --
+        # the model's own on the metal harness, but vLLM's externally-owned
+        # paged pool on the server. target_model.get_shared_kv_caches() reads
+        # the model's internal tt_kv_cache attribute, which the server never
+        # populates (vLLM hands KV in per-step), so the drafter would read an
+        # unallocated buffer (TT_FATAL is_allocated in the paged SDPA). Indexing
+        # the passed cache by the same last-layer-per-type map is identical on
+        # metal and correct on the server.
+        self._shared_kv = {lt: self.tt_kv_cache[idx] for lt, idx in target_model.last_kv_layer_by_type.items()}
         # Tracing: persistent I/O buffers + execute_trace replace per-op host
         # dispatch (the untraced loop is host-bound: ~77ms/decode vs a few ms
         # traced). Verify traces are keyed by batch (K+1 for verify, 1 for
@@ -568,9 +576,16 @@ class SpeculativeDecoder:
                 nkv_local = 1 if layer.self_attn.weights.kv_replicated else cfg.num_key_value_heads // tp
                 self._pv_nkv[lt] = int(nkv_local)
                 continue
-            layer.self_attn.kv_staging = init_kv_staging(
-                self.mesh_device, cfg, max_batch_size=1, block_size=self._pv_bs, blk=self._pv_blk
-            )
+            # Reuse an existing staging buffer if one is already attached to this
+            # layer (serving re-runs _pv_setup per request via a fresh decoder;
+            # the buffer is request-independent scratch of constant shape, so
+            # reallocating it every request would orphan the previous allocation
+            # and exhaust DRAM -- crash on the 2nd serving request). Allocate once.
+            existing = getattr(layer.self_attn, "kv_staging", None)
+            if existing is None or (hasattr(existing[0], "is_allocated") and not existing[0].is_allocated()):
+                layer.self_attn.kv_staging = init_kv_staging(
+                    self.mesh_device, cfg, max_batch_size=1, block_size=self._pv_bs, blk=self._pv_blk
+                )
             self._pv_nkv[lt] = int(layer.self_attn.kv_staging[0].shape[1])
         flat = (self.page_table_torch[0] if self.page_table_torch.dim() > 1 else self.page_table_torch).to(torch.int64)
         self._pv_pages = flat

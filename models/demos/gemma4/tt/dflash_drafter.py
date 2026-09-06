@@ -1346,6 +1346,17 @@ class DFlashFusedDecoder:
             proj.deallocate(True)
             chunks.append(host.reshape(-1, host.shape[-1])[:rv])
             seen += rv
+        if not chunks:
+            # No usable prefill taps reached the drafter (e.g. a chunked or
+            # prefix-cache-served prefill whose tap hook produced nothing for
+            # this request). Fail THIS request cleanly instead of killing the
+            # engine with an IndexError -- the server stays up for the rest of
+            # the sweep. The spec impls disable chunked/prefix-cached prefill
+            # to keep this from happening; this is the safety net.
+            raise RuntimeError(
+                f"dFlash prefill_ingest got no usable taps (n={n}, taps={len(taps)}); "
+                "prompt prefill produced no residual taps for this request"
+            )
         rows = torch.cat(chunks, dim=0) if len(chunks) > 1 else chunks[0]
         keep = min(self.cap, rows.shape[0], n)
         self.mirror[:keep] = rows[-keep:].to(torch.bfloat16)

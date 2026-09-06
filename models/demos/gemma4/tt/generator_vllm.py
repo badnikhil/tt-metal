@@ -1900,6 +1900,27 @@ def _dflash_default_snapshot():
     return hits[0] if hits else None
 
 
+def _assistant_default_snapshot(hf_model):
+    """Resolve the it-assistant (MTP drafter) checkpoint path.
+
+    On the server ``HF_MODEL`` is a LOCAL weights-symlink dir, so the harness
+    default ``f"{HF_MODEL}-assistant"`` yields a bogus path that
+    AutoConfig.from_pretrained rejects (HFValidationError). Resolve robustly:
+    (1) if ``{hf_model}-assistant`` is an existing dir, use it; else (2) infer
+    the size (12B/31B) from the model string and glob the HF cache snapshot.
+    """
+    import glob as _glob
+
+    cand = f"{hf_model}-assistant"
+    if os.path.isdir(cand):
+        return cand
+    size = "12B" if "12B" in str(hf_model) else "31B"
+    hits = _glob.glob(
+        os.path.expanduser(f"~/.cache/huggingface/hub/models--google--gemma-4-{size}-it-assistant/snapshots/*/")
+    )
+    return hits[0] if hits else cand
+
+
 class Gemma4DFlashForCausalLM(Gemma4ForCausalLM):
     """Gemma4 with the z-lab dFlash block-diffusion drafter, serving at B=1.
 
@@ -2012,7 +2033,13 @@ class Gemma4DFlashForCausalLM(Gemma4ForCausalLM):
         # capturing their taps would seed the drafter ctx with garbage. Only the
         # REAL prompt prefill sets the pending spec session.
         is_warmup = bool(kwargs.get("warmup_prefill")) or (tokens is not None and int(tokens.abs().sum()) == 0)
-        kwargs["enable_trace"] = False  # traced replays skip the tap hook
+        # Force EAGER prefill: the residual taps are captured by a python hook in
+        # the eager forward, which a traced replay skips. enable_trace=False gates
+        # the prefill-bucket trace; GEMMA4_CHUNKED_PREFILL_TRACE=0 (model spec)
+        # gates the per-chunk trace so multi-chunk prefills (ISL > one chunk)
+        # still fire the hook -- without it the drafter gets empty taps at ISL
+        # above the chunk size and the request fails.
+        kwargs["enable_trace"] = False
         if is_warmup:
             return super().prefill_forward(*args, **kwargs)
         model0.dflash_capture_taps(drafter.target_layer_ids, keep_last=12)
@@ -2257,8 +2284,8 @@ class Gemma4MTPForCausalLM(Gemma4ForCausalLM):
             self._spec = None
         model0 = self.model[0]
         if self._spec_assistant is None:
-            assistant_path = os.environ.get("GEMMA4_ASSISTANT_MODEL") or (
-                f"{os.environ.get('HF_MODEL', 'google/gemma-4-31B-it')}-assistant"
+            assistant_path = os.environ.get("GEMMA4_ASSISTANT_MODEL") or _assistant_default_snapshot(
+                os.environ.get("HF_MODEL", "google/gemma-4-31B-it")
             )
             _, self._spec_assistant = create_assistant_model(
                 mesh_device=self.mesh_device,
