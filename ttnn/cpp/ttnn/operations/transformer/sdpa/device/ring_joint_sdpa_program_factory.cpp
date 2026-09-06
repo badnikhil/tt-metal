@@ -193,6 +193,13 @@ constexpr uint32_t kReaderKernelIndex = 0;
 constexpr uint32_t kWriterKernelIndex = 1;
 constexpr uint32_t kComputeKernelIndex = 2;
 
+// Common-runtime-arg slots of the trace-safe metadata path. The tensors' DRAM addresses travel as plain
+// numbers (common args have no Buffer* binding form), so they are re-written on every cache hit by
+// apply_ring_joint_metadata_runtime_args; keep these in step with the emplace sites and the kernels.
+constexpr uint32_t kReaderMetaSlotAddrArg = 0;      // slot_id address; [1] kv_cache_num_layers, [2] kv_cache_layer_idx
+constexpr uint32_t kReaderMetaKvActualAddrArg = 3;  // kv_actual_isl address
+constexpr uint32_t kWriterMetaKvActualAddrArg = 0;  // kv_actual_isl address (chunked only)
+
 // Dense all-gather appends reader-forward, writer-forward, reader-backward, writer-backward.
 // Compact sliding appends only its predecessor reader/writer pair at indices 3 and 4.
 constexpr uint32_t kAllGatherReaderForwardKernelIndex = 3;
@@ -2625,6 +2632,7 @@ tt::tt_metal::ProgramDescriptor build_ring_joint_sdpa_program_descriptor(
     reader_kernel.defines = kernel_defines;
     reader_kernel.config = ReaderConfigDescriptor{};
     if (slot_from_metadata) {
+        // Slot layout: kReaderMetaSlotAddrArg .. kReaderMetaKvActualAddrArg (refreshed per hit, see the constants).
         reader_kernel.emplace_common_runtime_args(
             {tensor_args.slot_id->buffer()->address(),  // smuggled-rta-ok: metadata tensor addr (on-device)
              args.kv_cache_num_layers,
@@ -2963,6 +2971,34 @@ RingJointSDPAMeshWorkloadFactory::cached_mesh_workload_t RingJointSDPAMeshWorklo
     return descriptor_adapter_t::create_mesh_workload(args, tensor_coords, tensor_args, output_tensors);
 }
 
+// A caller may hand over a different slot_id / kv_actual_isl tensor on a later call that hits the cached
+// program (e.g. one kv_actual scalar per depth). The fused all-gather binds those buffers and follows them,
+// but the SDPA reader/writer receive the addresses as plain common runtime args, which the framework does
+// not refresh -- without this they would keep reading the first call's tensor (or whatever now sits at its
+// freed address), silently. Same shape as update_padded_kv_cache's per-hit metadata patch.
+static void apply_ring_joint_metadata_runtime_args(Program& program, const RingJointSDPAInputs& tensor_args) {
+    if (!tensor_args.has_metadata()) {
+        return;
+    }
+    const uint32_t slot_addr = tensor_args.slot_id->buffer()->address();
+    const uint32_t kv_actual_addr = tensor_args.kv_actual_isl->buffer()->address();
+    auto& reader_common = GetCommonRuntimeArgs(program, kReaderKernelIndex);
+    TT_FATAL(
+        reader_common.size() > kReaderMetaKvActualAddrArg,
+        "RingJointSDPA reader is missing its metadata common runtime args (size {})",
+        reader_common.size());
+    reader_common[kReaderMetaSlotAddrArg] = slot_addr;
+    reader_common[kReaderMetaKvActualAddrArg] = kv_actual_addr;
+    if (tensor_args.is_chunked()) {  // the writer reads kv_actual_isl only on the chunked path (kv_pad_from_metadata)
+        auto& writer_common = GetCommonRuntimeArgs(program, kWriterKernelIndex);
+        TT_FATAL(
+            writer_common.size() > kWriterMetaKvActualAddrArg,
+            "RingJointSDPA writer is missing its metadata common runtime args (size {})",
+            writer_common.size());
+        writer_common[kWriterMetaKvActualAddrArg] = kv_actual_addr;
+    }
+}
+
 void RingJointSDPAMeshWorkloadFactory::override_runtime_arguments(
     cached_mesh_workload_t& cached_workload,
     const RingJointSDPAParams& args,
@@ -2978,6 +3014,7 @@ void RingJointSDPAMeshWorkloadFactory::override_runtime_arguments(
             coord,
             coordinate_range.end_coord());
         apply_ring_joint_scalar_runtime_args(program, args, tensor_args, coord);
+        apply_ring_joint_metadata_runtime_args(program, tensor_args);
     }
 }
 

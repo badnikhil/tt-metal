@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: © 2026 Tenstorrent USA, Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-"""ring_joint cache-read through the trace-safe metadata path: bit-exact vs the host-int path, and one
-captured trace re-targets the cache-user slot by rewriting the metadata tensors between replays.
+"""ring_joint cache-read through the trace-safe metadata path: bit-exact vs the host-int path, a cached program
+follows freshly allocated metadata tensors, and one captured trace re-targets the cache-user slot by rewriting the
+metadata tensors between replays.
 
 Extends test_ring_joint_cache_read_sp_vs_ref to two users and two layers so the on-device slot fold
 (slot_id[0] * kv_cache_num_layers + kv_cache_layer_idx) is exercised, not just slot 0 / layer 0. Both users hold
@@ -172,7 +173,7 @@ def test_ring_joint_cache_read_metadata_trace(mesh_device, device_params, n_chun
     t_slot = _meta_scalar(0, mesh_device)
     t_kv = _meta_scalar(kv_actual_last, mesh_device)
 
-    def run_meta():
+    def run_meta(slot_t, kv_t):
         return dense_sp_attention(
             tt_q,
             cache_k,
@@ -181,19 +182,30 @@ def test_ring_joint_cache_read_metadata_trace(mesh_device, device_params, n_chun
             None,
             kv_actual=kv_actual_last,
             logical_n=cache_global,
-            slot_id=t_slot,
-            kv_actual_isl_tensor=t_kv,
+            slot_id=slot_t,
+            kv_actual_isl_tensor=kv_t,
             **common,
         )
 
     # Eager metadata call: bit-exact with the host-int path, and it warms the program + ring-gather buffers.
-    meta0 = gather(run_meta())
+    meta0 = gather(run_meta(t_slot, t_kv))
     assert torch.equal(
         meta0, host[0]
     ), f"metadata path != host-int path for user 0: max_abs={(meta0 - host[0]).abs().max()}"
 
+    # A caller may hand over freshly allocated metadata tensors on a later call (e.g. one kv_actual scalar per
+    # depth). That call hits the cached program, whose kernels hold the tensors' DRAM addresses as plain
+    # runtime args, so the op must re-point them. The first tensors stay alive so the new ones cannot land at
+    # the same addresses; a stale address would read slot 0 here and reproduce user 0's output.
+    t_slot_fresh, t_kv_fresh = _meta_scalar(1, mesh_device), _meta_scalar(kv_actual_last, mesh_device)
+    meta1 = gather(run_meta(t_slot_fresh, t_kv_fresh))
+    assert torch.equal(meta1, host[1]), (
+        f"cached program did not follow fresh metadata tensors: max_abs vs user 1={(meta1 - host[1]).abs().max()}, "
+        f"pcc_vs_user0={comp_pcc(host[0], meta1, 0.0)[1]}"
+    )
+
     tid = ttnn.begin_trace_capture(mesh_device, cq_id=0)
-    out_tr = run_meta()
+    out_tr = run_meta(t_slot, t_kv)
     ttnn.end_trace_capture(mesh_device, tid, cq_id=0)
 
     def replay_expecting(u):
