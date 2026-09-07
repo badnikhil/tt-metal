@@ -5,6 +5,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import re
+from pathlib import Path
 from tracy import perf_metrics_common as mc
 from tracy.perf_counter_analysis import COUNTER_TYPE_NAMES, PERF_COUNTER_CSV_HEADERS
 
