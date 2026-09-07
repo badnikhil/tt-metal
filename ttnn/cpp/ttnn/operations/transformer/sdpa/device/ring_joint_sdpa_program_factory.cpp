@@ -998,7 +998,7 @@ tt::tt_metal::ProgramDescriptor build_ring_joint_sdpa_program_descriptor(
     // q_local_padded_N (Q rows per device) can be shorter than kv_local_padded_N for chunked prefill.
     // Metadata uses an on-device cache-slot value, but needs the same single-slot program structure.
     const bool slot_from_metadata = tensor_args.has_metadata();
-    const bool indexed_kv_cache = args.has_indexed_kv_cache() || slot_from_metadata;
+    const bool indexed_kv_cache = ttnn::prim::indexed_kv_cache_active(args, tensor_args);
     // Latent-V mode: V tensors are omitted; the reader reuses K's buffer and
     // reads only the first vDHt head-dim tiles.
     const uint32_t B = q_shape[0];
@@ -1044,7 +1044,7 @@ tt::tt_metal::ProgramDescriptor build_ring_joint_sdpa_program_descriptor(
     const uint32_t logical_lt = tt::div_up(logical_l, tt::constants::TILE_HEIGHT);
     const uint32_t DHt = DH / tt::constants::TILE_WIDTH;
     const uint32_t vDHt = vDH / tt::constants::TILE_WIDTH;
-    const bool kv_pad_from_metadata = tensor_args.has_metadata() && tensor_args.is_chunked();
+    const bool kv_pad_from_metadata = tensor_args.kv_pad_from_metadata();
     const bool kv_pad_rotation_enabled = ttnn::prim::kv_pad_rotation_active(args, tensor_args);
     const RingJointRuntimePlan runtime_plan = build_runtime_plan(args, tensor_args, ring_write_plan);
     const RingJointRuntimeArgLayout runtime_arg_layout = get_runtime_arg_layout(args, tensor_args);
@@ -2892,7 +2892,7 @@ tt::tt_metal::ProgramDescriptor build_ring_joint_sdpa_program_descriptor(
         // kv_cache_batch_idx (scalar path) or a metadata tensor (trace-safe path, where the slot is read
         // on-device from metadata[0]). On the metadata path the host slot is absent, so pass a valid
         // placeholder (0) to turn on single-slot structure; the AG reader recomputes the real offset.
-        const bool ag_indexed = args.has_indexed_kv_cache() || tensor_args.has_metadata();
+        const bool ag_indexed = ttnn::prim::indexed_kv_cache_active(args, tensor_args);
         const std::optional<uint32_t> gather_slice_idx =
             ag_indexed ? std::optional<uint32_t>(args.cache_batch_idx().value_or(0)) : std::nullopt;
         ring_attention_all_gather_async_multi_core_with_workers_helper(

@@ -176,6 +176,9 @@ struct RingJointSDPAInputs {
 
     bool is_chunked() const { return input_q.logical_shape()[2] < local_kv_seq_len(); }
 
+    // The metadata path derives KV-pad rotation on-device only for chunked prefill.
+    bool kv_pad_from_metadata() const { return has_metadata() && is_chunked(); }
+
     // Latent-V optimization: absent V means the reader reuses K's buffer
     // and reads the first vDHt head-dim tiles (V's logical head dim).
     bool has_latent_v() const { return !input_v.has_value(); }
@@ -198,7 +201,13 @@ struct RingJointSDPAInputs {
 // on-device. Every host decision that hangs off the rotation mode (program hash, compile-time zeroing,
 // validation, the all-gather extent) goes through this one rule so they cannot disagree.
 inline bool kv_pad_rotation_active(const RingJointSDPAParams& args, const RingJointSDPAInputs& tensor_args) {
-    return args.has_kv_pad_rotation() || (tensor_args.has_metadata() && tensor_args.is_chunked());
+    return args.has_kv_pad_rotation() || tensor_args.kv_pad_from_metadata();
+}
+
+// Single-slot indexed KV cache is on when the host passes kv_cache_batch_idx or the metadata path supplies the
+// slot on-device; same one-rule discipline as kv_pad_rotation_active.
+inline bool indexed_kv_cache_active(const RingJointSDPAParams& args, const RingJointSDPAInputs& tensor_args) {
+    return args.has_indexed_kv_cache() || tensor_args.has_metadata();
 }
 
 // Index constants for RingJointSDPAResult vector

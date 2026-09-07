@@ -259,7 +259,7 @@ void validate_runtime_patched_scalars(const RingJointSDPAParams& args, const Rin
         validate_meta(tensor_args.slot_id.value(), "slot_id");
         validate_meta(tensor_args.kv_actual_isl.value(), "kv_actual_isl");
     }
-    if (args.has_indexed_kv_cache() || tensor_args.has_metadata()) {
+    if (indexed_kv_cache_active(args, tensor_args)) {
         // The cache batch is slot * kv_cache_num_layers + kv_cache_layer_idx on both paths (folded host-side by
         // cache_batch_idx(), on-device from slot_id[0]) and lands in a DRAM offset unchecked, so the two host
         // factors are bounded here; on the metadata path the slot itself is only knowable on device.
@@ -467,7 +467,7 @@ void RingJointSDPADeviceOperation::validate_on_program_cache_miss(
     validate_ring_joint_all_gather_on_program_cache_miss(
         args.all_gather_operation_attributes,
         args.all_gather_tensor_args,
-        args.has_indexed_kv_cache() || tensor_args.has_metadata(),
+        indexed_kv_cache_active(args, tensor_args),
         compact_gather_dim_minimum);
 
     // Check that SDPA coregrid does not overlap with AllGather coregrid
@@ -493,7 +493,7 @@ void RingJointSDPADeviceOperation::validate_on_program_cache_miss(
     const auto joint_q_shape = has_joint_tensors ? tensor_args.joint_q.value().logical_shape() : q_shape;
     const auto joint_k_shape = has_joint_tensors ? tensor_args.joint_k.value().logical_shape() : q_shape;
     const auto joint_v_shape = has_joint_tensors ? tensor_args.joint_v.value().logical_shape() : q_shape;
-    const bool has_indexed_kv_cache = args.has_indexed_kv_cache() || tensor_args.has_metadata();
+    const bool has_indexed_kv_cache = indexed_kv_cache_active(args, tensor_args);
     const uint32_t NVH = tensor_args.v_num_heads();
     const uint32_t VDH = tensor_args.v_head_dim(args.latent_v_head_dim);
 
@@ -672,16 +672,18 @@ void RingJointSDPADeviceOperation::validate_on_program_cache_miss(
         // checks live in validate_runtime_patched_scalars (called below; also runs on cache hits).
         TT_FATAL(
             is_chunked,
-            "kv_actual_isl enables KV-pad-aware rotation and requires chunked-prefill input (Q.seq < K.seq). "
+            "KV-pad rotation (host kv_actual_isl or metadata) requires chunked-prefill input (Q.seq < K.seq). "
             "Got N_local_q={}, N_local_kv={}",
             N_local_q,
             N_local_kv);
         TT_FATAL(
             args.is_causal,
-            "kv_actual_isl enables KV-pad-aware rotation, which is causal-only. Got is_causal={}",
+            "KV-pad rotation (host kv_actual_isl or metadata) is causal-only. Got is_causal={}",
             args.is_causal);
         TT_FATAL(
-            !args.is_balanced, "kv_actual_isl does not support balanced zigzag distribution. Pass is_balanced=false.");
+            !args.is_balanced,
+            "KV-pad rotation (host kv_actual_isl or metadata) does not support balanced zigzag distribution. Pass "
+            "is_balanced=false.");
         TT_FATAL(
             L == 0,
             "KV-pad-aware rotation currently supports ring attention without joint tokens. Got joint length L={}",
@@ -838,7 +840,9 @@ void RingJointSDPADeviceOperation::validate_on_program_cache_miss(
         TT_FATAL(!args.is_causal, "sharded joint is incompatible with is_causal");
         TT_FATAL(!args.is_balanced, "sharded joint is incompatible with is_balanced (zigzag)");
         TT_FATAL(!args.is_cross, "sharded joint is incompatible with is_cross");
-        TT_FATAL(!args.kv_cache_batch_idx.has_value(), "sharded joint is incompatible with indexed KV cache");
+        TT_FATAL(
+            !has_indexed_kv_cache,
+            "sharded joint is incompatible with indexed KV cache (host kv_cache_batch_idx or metadata)");
         TT_FATAL(
             !has_kv_pad_rotation,
             "sharded joint is incompatible with KV-pad rotation (host kv_actual_isl or metadata)");
@@ -1044,8 +1048,10 @@ ttsl::hash::hash_t RingJointSDPADeviceOperation::compute_program_hash(
         tensor_args.slot_id.has_value() ? tensor_args.slot_id->memory_config() : tt::tt_metal::MemoryConfig{},
         tensor_args.kv_actual_isl.has_value() ? tensor_args.kv_actual_isl->memory_config()
                                               : tt::tt_metal::MemoryConfig{},
-        args.kv_cache_num_layers,
-        args.kv_cache_layer_idx,
+        // The layer fold is baked into kernel runtime args only on the metadata path; the host path re-patches
+        // the folded index per dispatch, so keying the factors there would only multiply programs per layer.
+        tensor_args.has_metadata() ? args.kv_cache_num_layers : 0u,
+        tensor_args.has_metadata() ? args.kv_cache_layer_idx : 0u,
         tensor_args.has_latent_v(),
         tensor_args.v_num_heads(),
         tensor_args.v_head_dim(args.latent_v_head_dim),
