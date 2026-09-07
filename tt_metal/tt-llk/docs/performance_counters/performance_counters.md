@@ -378,7 +378,7 @@ FPU active cycles relative to math-instruction availability on the math thread.
 | **Counter group** | FPU + INSTRN_THREAD |
 
 ```
-FPU Execution Efficiency = FPU_INSTRUCTION / FPU_INSTRN_AVAILABLE_1 * 100
+FPU Execution Efficiency = FPU_INSTRUCTION / MATH_INSTRN_AVAILABLE_1 * 100
 ```
 
 - **High value (>80%)**: FPU executes whenever math work is pending — compute-bound.
@@ -398,7 +398,7 @@ Ratio of math-output availability to packer consumption.
 | **Counter group** | TDMA_PACK |
 
 ```
-Math-to-Pack Handoff = AVAILABLE_MATH / PACKER_BUSY * 100
+Math-to-Pack Handoff = MATH_NOT_SCOREBOARD_STALLED / PACKER_BUSY * 100
 ```
 
 - **>100%**: Math produces output faster than packer can consume (packer is the bottleneck).
@@ -572,11 +572,11 @@ Fraction of math-valid cycles stalled by dest-to-src hazards (MOVD2A / MOVD2B).
 | **Counter group** | TDMA_UNPACK |
 
 ```
-Data Hazard Stall = (MATH_INSTRN_AVAILABLE - DATA_HAZARD_STALLS_MOVD2A) /
+Data Hazard Stall = (MATH_INSTRN_AVAILABLE - MATH_NOT_D2S_STALLED) /
                     MATH_INSTRN_AVAILABLE * 100
 ```
 
-`DATA_HAZARD_STALLS_MOVD2A` is `math_instrn_valid & ~dest2src_post_stall` — cycles math was available *and not* D2A-stalled. Subtracting from `MATH_INSTRN_AVAILABLE` gives the stall count.
+`MATH_NOT_D2S_STALLED` is `math_instrn_valid & ~dest2src_post_stall` — cycles math was available *and not* D2A-stalled. Subtracting from `MATH_INSTRN_AVAILABLE` gives the stall count.
 
 **Use case:** Surfaces dest-to-src register-movement overhead.
 
@@ -652,7 +652,7 @@ Fraction of math-available cycles stalled by FPU data-hazard scoreboard.
 | **Counter group** | TDMA_PACK |
 
 ```
-Math Scoreboard Stall = (MATH_INSTRN_AVAILABLE - AVAILABLE_MATH) /
+Math Scoreboard Stall = (MATH_INSTRN_AVAILABLE - MATH_NOT_SCOREBOARD_STALLED) /
                         MATH_INSTRN_AVAILABLE * 100
 ```
 
@@ -917,7 +917,7 @@ Fraction of total cycles each thread spent waiting for specific hardware units.
 | **Counter group** | INSTRN_THREAD |
 
 ```
-MMIO Idle Wait T0  = WAITING_FOR_MMIO_IDLE_0  / INSTRN_OUT_L * 100
+MMIO Idle Wait T0  = WAITING_FOR_CFG_IDLE_0  / INSTRN_OUT_L * 100
 SFPU Idle Wait T1  = WAITING_FOR_SFPU_IDLE_1  / INSTRN_OUT_L * 100
 THCON Idle Wait T0 = WAITING_FOR_THCON_IDLE_0 / INSTRN_OUT_L * 100
 MOVE Idle Wait T0  = WAITING_FOR_MOVE_IDLE_0  / INSTRN_OUT_L * 100
