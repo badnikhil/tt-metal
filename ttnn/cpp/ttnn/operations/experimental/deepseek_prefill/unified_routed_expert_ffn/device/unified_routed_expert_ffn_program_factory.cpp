@@ -471,7 +471,7 @@ UnifiedRoutedExpertFfnProgramFactory::cached_program_t UnifiedRoutedExpertFfnPro
     // a turn as sender exactly once per chunk.
     const uint32_t act_ready_sem_id = tt::tt_metal::CreateSemaphore(program, core_range_set, 0);
     const uint32_t act_valid_sem_id = tt::tt_metal::CreateSemaphore(program, core_range_set, 0);
-    // Two-RISC weight read: use the writer (NCRISC, idle until the down output)
+    // Two-RISC weight read: use the writer (BRISC, idle until the down output)
     // as a second read engine for `up`, read on NoC 1 concurrent with the
     // reader's NoC-0 `gate` read. Two delivery schemes:
     //
@@ -668,7 +668,7 @@ UnifiedRoutedExpertFfnProgramFactory::cached_program_t UnifiedRoutedExpertFfnPro
             .set_page_size(CB_START_SCRATCH, start_scratch_bytes);
     tt::tt_metal::CreateCircularBuffer(program, core_range_set, start_cb_cfg);
     // Reader's `start` scratch. Same sizing; separate CB so
-    // reader (BRISC) and writer (NCRISC) never share one scratch page.
+    // reader (NCRISC) and writer (BRISC) never share one scratch page.
     tt::tt_metal::CircularBufferConfig start_reader_cb_cfg =
         tt::tt_metal::CircularBufferConfig(start_scratch_bytes, {{CB_START_SCRATCH_READER, tt::DataFormat::UInt32}})
             .set_page_size(CB_START_SCRATCH_READER, start_scratch_bytes);

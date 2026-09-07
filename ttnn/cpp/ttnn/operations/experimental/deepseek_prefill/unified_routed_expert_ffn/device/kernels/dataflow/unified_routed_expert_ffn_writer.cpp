@@ -20,7 +20,7 @@
 //    round-trip). expert_region_offsets is a mandatory op input, so there is
 //    no per-expert-output-tensor mode.
 //
-// 2. Two-RISC `up`-weight read (UP_SPLIT). The writer (NCRISC) reads `up`
+// 2. Two-RISC `up`-weight read (UP_SPLIT). The writer (BRISC) reads `up`
 //    from DRAM on NoC 1 concurrent with the reader's NoC-0 `gate` read. The
 //    program factory selects UP_SPLIT (writer_split_up) for ALL layouts: the
 //    writer reads `up` into the gy=0 sender's cb_in1_up slot and the reader
@@ -174,7 +174,7 @@ void kernel_main() {
     // ---- UP_SPLIT up-weight read setup (see header) ----
     // The writer reads `up` from DRAM on NoC 1 concurrent with the reader's
     // NoC-0 `gate` read, into the gy=0 sender's cb_in1_up slot; the reader
-    // multicasts it on NoC 0. A local same-core (BRISC reader <-> NCRISC writer)
+    // multicasts it on NoC 0. A local same-core (NCRISC reader <-> BRISC writer)
     // handshake (up_go / up_done, monotonic) orders the two.
     Noc noc_up(1);
     const uint32_t up_tile_bytes = get_tile_size(cb_in1_up);

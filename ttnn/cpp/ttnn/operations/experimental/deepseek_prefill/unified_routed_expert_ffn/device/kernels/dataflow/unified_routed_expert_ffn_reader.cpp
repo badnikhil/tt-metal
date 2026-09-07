@@ -272,7 +272,7 @@ void kernel_main() {
 
     // Look up active token count for this expert from device-side buffers.
     // Reserve+read+push so the compute kernel (TRISC) and writer kernel
-    // (NCRISC) can cb_wait_front on these CBs and read the same L1 data.
+    // (BRISC) can cb_wait_front on these CBs and read the same L1 data.
     //
     // Each scratch CB is a single page sized (host-side) to hold up to
     // MAX_GLOBAL_EXPERTS UINT32 entries, so `1` here is the whole buffer and a
