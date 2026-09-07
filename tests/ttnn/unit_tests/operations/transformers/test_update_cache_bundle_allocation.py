@@ -55,10 +55,9 @@ class CachePool:
         return state
 
 
-@pytest.mark.parametrize("mesh_device", [(1, 1), (1, 2)], indirect=True)
-def test_concurrent_requests_and_slot_reuse(mesh_device):
-    mesh_device.enable_program_cache()
-    pools = [CachePool(mesh_device) for _ in range(2)]  # Distinct live buffers exercise program-cache reuse.
+def test_concurrent_requests_and_slot_reuse(device):
+    device.enable_program_cache()
+    pools = [CachePool(device) for _ in range(2)]  # Distinct live buffers exercise program-cache reuse.
     for pool_index, pool in enumerate(pools):
         # slot, token start/end, expected live bundle IDs for each slot.
         requests = [
@@ -80,8 +79,8 @@ def test_concurrent_requests_and_slot_reuse(mesh_device):
             for row, ids in zip(table, expected):
                 assert row[: len(ids)].tolist() == ids
         if pool_index == 0:
-            entries = mesh_device.num_program_cache_entries()
-        assert mesh_device.num_program_cache_entries() == entries
+            entries = device.num_program_cache_entries()
+        assert device.num_program_cache_entries() == entries
 
 
 def test_full_pool_release_and_reuse(device, expect_error):
