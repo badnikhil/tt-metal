@@ -11,10 +11,10 @@ over the ring), so there is no explicit AllGather here:
   ring_joint_scaled_dot_product_attention(q, cache_k, cache_v, kv_actual_isl, logical_n)
                                                             causal GQA over the cached prefix [0:logical_n]
 
-Grouped V (cache stays n_kv heads, 1/chip at TP=4 — NO inflation; Pavle's GQA-causal kernel). No
-balancing / zigzag for chunked prefill (is_balanced=False). The validated building block is
-tests/unit/test_ring_joint_cache_read_sp_vs_ref.py (PCC 0.99994); this is that mechanism as a callable
-model forward. Perf config q_chunk=128 / k_chunk=512 (Pavle's minimax3_gqa_causal_perf).
+Grouped V (cache stays n_kv heads, 1/chip at TP=4 — NO inflation). No balancing / zigzag for chunked
+prefill (is_balanced=False). Validated op-level by tests/unit/test_ring_joint_cache_read_sp_vs_ref.py; this
+is that mechanism as a callable model forward. Perf config q_chunk=128 / k_chunk=512 (the
+minimax3_gqa_causal_perf configuration in tests/nightly/blackhole/sdpa/test_ring_joint_sdpa.py).
 """
 
 import ttnn
@@ -60,8 +60,8 @@ def dense_sp_attention(
                       read by the kernels at start, so a captured trace re-targets them in place between
                       replays. Both or neither. The chunk write (write_chunk) and the read both take them;
                       the host slot_idx / kv_actual are then NOT passed to either op (the op rejects the mix).
-                      logical_n passes through as the real length; the kernels derive it on-device as
-                      kv_actual_isl[0] + chunk and the op leaves it out of the program hash on this path.
+                      logical_n passes through as the real length; on chunked shapes the kernels derive it
+                      on-device as kv_actual_isl[0] + chunk and the op leaves it out of the program hash.
     -> out            [1, n_q_local, chunk_local, head_dim]    block-cyclic over the chunk
     """
     if (slot_id is None) != (kv_actual_isl_tensor is None):
@@ -106,7 +106,7 @@ def dense_sp_attention(
         None,
         None,
         # Persistent ring-gather scratch, allocated once by the CCL manager and reused across all
-        # layers/chunks (was a per-call from_torch(zeros)). dtype MUST match the (bf8) KV cache.
+        # layers/chunks. dtype MUST match the (bf8) KV cache.
         persistent_output_buffer_k=ccl_manager.get_ring_gather_buffer(
             "dense_k", n_kv, cache_global, head_dim, ttnn.bfloat8_b
         ),
@@ -152,7 +152,7 @@ def dense_sp_attention_nocache(
     Each device's query shard attends to the full `logical_n` sequence reconstructed across the SP ring
     (grouped V, no inflation, is_balanced=False). For the first prefill chunk where there's no prior
     cache; multi-chunk accumulation uses dense_sp_attention (cache-read). Validated op-level by
-    tests/unit/test_ring_joint_sp_vs_ref.py (PCC 0.99998). Returns the per-device query-shard output.
+    tests/unit/test_ring_joint_sp_vs_ref.py. Returns the per-device query-shard output.
 
     n_kv is the GLOBAL KV-head count (e.g. 4); the ring-gather persistent buffer shards it across the TP
     cols (1/device at TP=4), matching the per-device KV head that tt_k/tt_v already carry.
