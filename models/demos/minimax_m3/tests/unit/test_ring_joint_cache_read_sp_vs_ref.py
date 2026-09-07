@@ -23,6 +23,7 @@ from .ring_joint_cache_read_helpers import (
     HEAD_DIM,
     NKV,
     NQ,
+    PCC_BF8_CACHE,
     SP_AXIS,
     gather_chunk,
     make_kv_chunk,
@@ -111,6 +112,6 @@ def test_ring_joint_cache_read_sp(mesh_device, device_params, n_chunks, chunk_lo
 
     full = gather_chunk(out, kv_actual_last, mesh_device, C)  # natural order over positions kv_actual_last:cache_global
 
-    passing, pcc = comp_pcc(ref, full, 0.99)
+    passing, pcc = comp_pcc(ref, full, PCC_BF8_CACHE)
     logger.info(f"ring_joint CACHE-READ SP=8 x TP=4 vs ref: pcc={pcc}")
     assert passing, f"cache-read PCC fail: {pcc}"
