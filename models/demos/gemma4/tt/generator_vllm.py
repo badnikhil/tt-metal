@@ -1957,8 +1957,11 @@ class Gemma4DFlashForCausalLM(Gemma4ForCausalLM):
         "supports_async_decode": False,
         "supports_sample_on_device": True,  # decode returns TOKENS (host)
         # A vLLM step commits up to _SPEC_BLOCK tokens (variable prefix, padded).
+        # GEMMA4_DFLASH_SERVE_BLOCK=1 turns block-output OFF, so this impl can
+        # also be deployed as a plain batched baseline (max_num_seqs>1) for the
+        # concurrency>1 / throughput operating point -- see decode_forward.
         "output_tokens_per_step": _SPEC_BLOCK,
-        "tt_spec_variable_output": True,
+        "tt_spec_variable_output": _SPEC_BLOCK > 1,
     }
 
     def __init__(self, *args, **kwargs):
@@ -2011,8 +2014,12 @@ class Gemma4DFlashForCausalLM(Gemma4ForCausalLM):
         return self._spec_drafter
 
     def warmup_model_decode(self, *args, **kwargs):
-        """No-op: decode is the per-session fused spec trace, captured at the
-        first decode of each request; the base decode buckets are never used."""
+        """No-op in spec mode: decode is the per-session fused spec trace,
+        captured at the first decode of each request; the base decode buckets
+        are never used. In throughput mode (GEMMA4_DFLASH_SERVE_BLOCK=1) the
+        baseline batched decode IS used, so warm its buckets normally."""
+        if self._SPEC_BLOCK <= 1:
+            return super().warmup_model_decode(*args, **kwargs)
         del args, kwargs
         self._decode_warmup_complete = True
         logger.info("Gemma4DFlash: decode warmup is a no-op (per-session fused spec trace)")
@@ -2022,11 +2029,12 @@ class Gemma4DFlashForCausalLM(Gemma4ForCausalLM):
         tokens = kwargs.get("tokens")
         if tokens is None and args:
             tokens = args[0]
-        if tokens is not None and int(tokens.shape[0]) != 1:
-            raise ValueError(
-                "Gemma4DFlash serving is B=1 (set max_num_seqs=1 in the model "
-                f"spec); got prefill batch {int(tokens.shape[0])}"
-            )
+        # Baseline pickup: dFlash spec is B=1 block-output. In a non-block-output
+        # / throughput deployment (GEMMA4_DFLASH_SERVE_BLOCK=1) or for any
+        # batched (concurrency>1) prefill, serve via the plain baseline path and
+        # skip the drafter tap capture entirely.
+        if self._SPEC_BLOCK <= 1 or (tokens is not None and int(tokens.shape[0]) != 1):
+            return super().prefill_forward(*args, **kwargs)
         drafter = self._spec_get_drafter()
         model0 = self.model[0]
         # Boot warmup prefills feed all-zero dummy tokens (and warmup_prefill=1);
@@ -2143,8 +2151,14 @@ class Gemma4DFlashForCausalLM(Gemma4ForCausalLM):
         start_pos = kwargs.get("start_pos")
         if start_pos is None and len(args) > 1:
             start_pos = args[1]
-        if tokens is None or int(tokens.shape[0]) != 1:
-            raise ValueError("Gemma4DFlash decode expects B=1 token input")
+        if tokens is None:
+            raise ValueError("Gemma4DFlash decode expects token input")
+        # Baseline pickup for concurrency>1: dFlash spec is a B=1 block-output
+        # session. A batched decode (or a non-block-output/throughput
+        # deployment with GEMMA4_DFLASH_SERVE_BLOCK=1) is served by the plain
+        # baseline decode instead of the spec drafter.
+        if self._SPEC_BLOCK <= 1 or int(tokens.shape[0]) != 1:
+            return super().decode_forward(*args, page_tables_per_layer=page_tables_per_layer, **kwargs)
         anchor_from_runner = int(tokens.reshape(-1)[0])
         if self._spec_pending is not None:
             start = int(start_pos.reshape(-1)[0]) if start_pos is not None else None
@@ -2196,7 +2210,10 @@ class Gemma4DFlashForCausalLM(Gemma4ForCausalLM):
         return out
 
     def read_decode_output(self, tt_out, async_read=False, *_, **__):
-        # decode_forward returns the committed host block directly.
+        # Throughput mode: baseline decode_forward's device output is read the
+        # base way. Spec mode: decode_forward returns the committed host block.
+        if self._SPEC_BLOCK <= 1:
+            return super().read_decode_output(tt_out, async_read, *_, **__)
         return (tt_out, []) if async_read else tt_out
 
     # -- plugin lifecycle hooks (block-output contract) -----------------------
