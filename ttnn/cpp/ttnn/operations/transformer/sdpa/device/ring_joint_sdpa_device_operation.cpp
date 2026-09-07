@@ -218,26 +218,20 @@ void validate_ring_joint_all_gather_on_program_cache_miss(
     }
 }
 
-// Checks the program hash does not key, so they run on every dispatch: the runtime-patched host scalars
-// (kv_cache_batch_idx, logical_n, kv_actual_isl), the metadata tensors' form and their exclusivity with the
-// host scalars, and the (user, layer) fold bounds. Shared by the miss and hit validators so they cannot
-// diverge.
+// Everything the program hash does not key, so it runs on every dispatch (miss and hit): the host scalars
+// kv_cache_batch_idx / logical_n / kv_actual_isl, the metadata tensors' form and exclusivity, the layer-fold bounds.
 void validate_runtime_patched_scalars(const RingJointSDPAParams& args, const RingJointSDPAInputs& tensor_args) {
     TT_FATAL(
         tensor_args.slot_id.has_value() == tensor_args.kv_actual_isl.has_value(),
         "metadata tensors slot_id and kv_actual_isl must be supplied together, or neither supplied");
-    // The host scalars still reach the program when both forms are given: the fused all-gather bounds its
-    // extent by the smaller of the host logical_n and the on-device kv_actual_isl, while the SDPA readers
-    // follow the tensors alone, so a host value below the tensor's leaves SDPA reading pages the gather
-    // never wrote. Refuse the mix instead of picking a winner.
+    // With both forms present the host logical_n would still bound the all-gather (min with the on-device length)
+    // while SDPA reads the tensor's length, so a shorter host value leaves SDPA reading pages never gathered.
     TT_FATAL(
         !(tensor_args.has_metadata() && (args.kv_cache_batch_idx.has_value() || args.kv_actual_isl.has_value())),
         "metadata tensors replace the host kv_cache_batch_idx / kv_actual_isl; pass one form, not both");
     if (tensor_args.has_metadata()) {
-        // The kernels fetch element [0] of each tensor at start through a TensorAccessor whose bank table is
-        // baked into the compile-time args from the FIRST call; the hash keys only has_metadata() and the
-        // memory config, not the tensor. So every call, hit or miss, must pin the form that accessor assumes
-        // (DRAM interleaved, one uint32 element): anything else is read as garbage on-device, no error.
+        // Each tensor's accessor is baked into compile-time args on the first call and the hash keys only
+        // has_metadata() and the memory config, so every call must pin the form: DRAM interleaved, one uint32 element.
         const auto& input_q = tensor_args.input_q;
         auto validate_meta = [&input_q](const Tensor& meta, const char* name) {
             TT_FATAL(meta.storage_type() == StorageType::DEVICE, "metadata tensor {} must be on device", name);
@@ -260,9 +254,8 @@ void validate_runtime_patched_scalars(const RingJointSDPAParams& args, const Rin
         validate_meta(tensor_args.kv_actual_isl.value(), "kv_actual_isl");
     }
     if (indexed_kv_cache_active(args, tensor_args)) {
-        // The cache batch is slot * kv_cache_num_layers + kv_cache_layer_idx on both paths (folded host-side by
-        // cache_batch_idx(), on-device from slot_id[0]) and lands in a DRAM offset unchecked, so the two host
-        // factors are bounded here; on the metadata path the slot itself is only knowable on device.
+        // The cache batch, slot * kv_cache_num_layers + kv_cache_layer_idx on both paths, is used as a DRAM offset
+        // unchecked; the two host factors are bounded here, slot_id[0] is knowable only on device.
         const auto K_cache_batch = tensor_args.input_k.logical_shape()[0];
         const auto V_cache_batch =
             tensor_args.input_v.has_value() ? tensor_args.input_v->logical_shape()[0] : K_cache_batch;
@@ -664,8 +657,7 @@ void RingJointSDPADeviceOperation::validate_on_program_cache_miss(
     validate_runtime_patched_scalars(args, tensor_args);
 
     if (has_kv_pad_rotation) {
-        // Shape/flag preconditions; hash-keyed, so once at miss time suffices. The logical_n / kv_actual_isl
-        // value checks live in validate_runtime_patched_scalars.
+        // Hash-keyed shape/flag preconditions; the value checks live in validate_runtime_patched_scalars.
         TT_FATAL(
             is_chunked,
             "KV-pad rotation (host kv_actual_isl or metadata) requires chunked-prefill input (Q.seq < K.seq). "
@@ -946,8 +938,7 @@ void RingJointSDPADeviceOperation::validate_on_program_cache_miss(
 
 void RingJointSDPADeviceOperation::validate_on_program_cache_hit(
     const RingJointSDPAParams& args, const RingJointSDPAInputs& tensor_args) {
-    // The hash guarantees everything it keys matched a miss that passed full validation; re-check only what it
-    // leaves out.
+    // Re-check only what the hash does not key; everything else matched a miss that passed full validation.
     validate_runtime_patched_scalars(args, tensor_args);
 }
 
@@ -1038,9 +1029,8 @@ ttsl::hash::hash_t RingJointSDPADeviceOperation::compute_program_hash(
         args.kv_cache_batch_idx.has_value(),
         kv_pad_rotation_enabled,
         tensor_args.has_metadata(),
-        // The reader/writer bake a TensorAccessorArgs per metadata tensor into their compile-time args. The
-        // validator pins the tensors to one form, so this key is defense in depth: should that pin ever relax, a
-        // different memory config still gets its own program. Only the config is keyed, never the value.
+        // The metadata accessors are baked into compile-time args; the validator pins one form, so this key is
+        // defense in depth should that pin ever relax. Only the config is keyed, never the value.
         tensor_args.slot_id.has_value() ? tensor_args.slot_id->memory_config() : tt::tt_metal::MemoryConfig{},
         tensor_args.kv_actual_isl.has_value() ? tensor_args.kv_actual_isl->memory_config()
                                               : tt::tt_metal::MemoryConfig{},

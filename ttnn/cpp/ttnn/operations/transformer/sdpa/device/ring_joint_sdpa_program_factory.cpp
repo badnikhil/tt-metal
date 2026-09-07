@@ -563,12 +563,11 @@ void write_runtime_arg(RuntimeArgsData& args, uint32_t index, uint32_t value, co
     args[index] = value;
 }
 
-// Host bound on the fused all-gather extent, in tile rows per (batch, head), so an oversized (growing) KV cache
-// only moves kv_actual-sized data: ceil(logical_n / chunk_global) slabs == a contiguous page prefix. Shared
-// by the descriptor-create path and the cache-hit override path. Returns nullopt unless the host passes
-// kv_actual_isl: without rotation the full input is gathered, and on the metadata path the all-gather
-// kernels clamp the extent from kv_actual_isl[0] on every dispatch -- a bound taken from the host logical_n
-// there (off the hash, not refreshed on hits) would outlive the chunk it was computed for.
+// Host bound on the fused all-gather extent, in tile rows per (batch, head): ceil(logical_n / chunk_global) slabs, so
+// a growing KV cache moves only kv_actual-sized data. Used at create time and on the cache-hit override path. nullopt
+// unless the host passes kv_actual_isl: without rotation the whole input is gathered, and on the metadata path the
+// kernels clamp from kv_actual_isl[0] per dispatch -- a bound from the host logical_n (off the hash, never refreshed)
+// would outlive the chunk it was computed for.
 std::optional<uint32_t> compute_gather_valid_Ht(
     const ttnn::prim::RingJointSDPAParams& args, const ttnn::prim::RingJointSDPAInputs& tensor_args) {
     if (!args.has_kv_pad_rotation()) {

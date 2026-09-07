@@ -89,8 +89,7 @@ struct RingJointSDPAParams {
 
     bool has_indexed_kv_cache() const { return kv_cache_batch_idx.has_value(); }
 
-    // Cache batch on the host path: the same (user, layer)-major fold the readers apply to slot_id[0] on the
-    // metadata path, so both forms of the slot address one cache layout. Identity with the defaults (1, 0).
+    // Host-path cache batch: the same (user, layer) fold the readers apply to slot_id[0]. Identity with the defaults.
     std::optional<std::uint32_t> cache_batch_idx() const {
         return kv_cache_batch_idx.has_value()
                    ? std::optional<std::uint32_t>(*kv_cache_batch_idx * kv_cache_num_layers + kv_cache_layer_idx)
@@ -158,10 +157,9 @@ struct RingJointSDPAInputs {
     std::optional<Tensor> gathered_joint_k;
     std::optional<Tensor> gathered_joint_v;
 
-    // Trace-safe metadata path (both or neither): 1-element uint32 DRAM tensors the kernels read at start --
-    // slot_id[0] is the cache-user slot, kv_actual_isl[0] the prior valid global KV length -- so one captured
-    // program replays across chunks and users. Contract: ring_joint_scaled_dot_product_attention docstring
-    // (sdpa_nanobind.cpp).
+    // Trace-safe metadata path (both or neither): 1-element uint32 DRAM tensors the kernels read at start, slot_id[0]
+    // the cache-user slot and kv_actual_isl[0] the prior valid global KV length, so one captured program replays
+    // across chunks and users. Contract: ring_joint_scaled_dot_product_attention docstring (sdpa_nanobind.cpp).
     std::optional<Tensor> slot_id;
     std::optional<Tensor> kv_actual_isl;
 
@@ -194,16 +192,14 @@ struct RingJointSDPAInputs {
     bool joint_is_sharded() const { return gathered_joint_k.has_value(); }
 };
 
-// KV-pad rotation is on when the host passes kv_actual_isl, or when the chunked metadata path derives it
-// on-device. Every host decision that hangs off the rotation mode (program hash, compile-time zeroing,
-// validation) goes through this one rule so they cannot disagree. The all-gather bound
+// KV-pad rotation: the host passes kv_actual_isl, or the chunked metadata path derives it on-device. Program hash,
+// compile-time zeroing and validation all go through this rule so they cannot disagree. The all-gather bound
 // (compute_gather_valid_Ht) is the deliberate exception: it needs a host length, so it is host-path only.
 inline bool kv_pad_rotation_active(const RingJointSDPAParams& args, const RingJointSDPAInputs& tensor_args) {
     return args.has_kv_pad_rotation() || tensor_args.kv_pad_from_metadata();
 }
 
-// Single-slot indexed KV cache is on when the host passes kv_cache_batch_idx or the metadata path supplies the
-// slot on-device; same one-rule discipline as kv_pad_rotation_active.
+// Single-slot indexed KV cache: the host passes kv_cache_batch_idx, or the metadata path supplies the slot on-device.
 inline bool indexed_kv_cache_active(const RingJointSDPAParams& args, const RingJointSDPAInputs& tensor_args) {
     return args.has_indexed_kv_cache() || tensor_args.has_metadata();
 }
