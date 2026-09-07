@@ -25,6 +25,7 @@ import ttnn
 
 from tests.ttnn.nightly.unit_tests.operations.experimental.indexer_score.test_indexer_score import (
     assert_indexer_match,
+    to_device,
     glx_config,
     indexer_score_dsa_ref,
     _global_inputs,
@@ -118,7 +119,7 @@ def test_indexer_score_ring4_fused_4d(case_id, heads, block_cyclic):
 
         shard = ttnn.ShardTensorToMesh(mesh, dim=2)  # SP-shard seq over the 4 devices
         q_dev = ttnn.from_torch(q_g, device=mesh, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, mesh_mapper=shard)
-        w_dev = ttnn.from_torch(w_g, device=mesh, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, mesh_mapper=shard)
+        w_dev = to_device(w_g, mesh, mesh_mapper=shard)
         k_local = ttnn.from_torch(k_host, device=mesh, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, mesh_mapper=shard)
         # Gathered buffer: full T per device, zero-seeded (AG fills remote bands; zeros prove local sourcing).
         k_gathered = ttnn.from_torch(
@@ -155,7 +156,8 @@ def test_indexer_score_ring4_fused_4d(case_id, heads, block_cyclic):
 
 
 @pytest.mark.requires_host_iommu
-def test_indexer_score_ring4_true_ring_bfp8_bank_owned_reference_cache_hit():
+@pytest.mark.parametrize("heads", [4, 32])
+def test_indexer_score_ring4_true_ring_bfp8_bank_owned_reference_cache_hit(heads):
     """Reference-check the production BFP8 bank-owned path on a true QuietBox Ring.
 
     The large BFP8 K capacity exercises the bank-owned schedule's midpoint/completion protocol. Two runtime
@@ -165,7 +167,6 @@ def test_indexer_score_ring4_true_ring_bfp8_bank_owned_reference_cache_hit():
     """
     sp = 4
     sp_axis = 0
-    heads = 4
     q_per_rank = 32
     chunk_global = sp * q_per_rank
     k_capacity = 256 * 1024
@@ -179,7 +180,7 @@ def test_indexer_score_ring4_true_ring_bfp8_bank_owned_reference_cache_hit():
         k_bc = _to_slab(k_nat, sp, chunk_global)
         sp_shard = ttnn.ShardTensor2dMesh(mesh, mesh_shape=(sp, 1), dims=(2, None))
         q_dev = ttnn.from_torch(q_g, device=mesh, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, mesh_mapper=sp_shard)
-        w_dev = ttnn.from_torch(w_g, device=mesh, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, mesh_mapper=sp_shard)
+        w_dev = to_device(w_g, mesh, mesh_mapper=sp_shard)
         k_local = ttnn.from_torch(
             k_bc,
             device=mesh,
@@ -277,7 +278,7 @@ def test_indexer_score_ring4_small_capacity_has_no_empty_lane_deadlock():
         k_bc = _to_slab(k_nat, sp, chunk_global)
         sp_shard = ttnn.ShardTensor2dMesh(mesh, mesh_shape=(sp, 1), dims=(2, None))
         q_dev = ttnn.from_torch(q_g, device=mesh, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, mesh_mapper=sp_shard)
-        w_dev = ttnn.from_torch(w_g, device=mesh, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, mesh_mapper=sp_shard)
+        w_dev = to_device(w_g, mesh, mesh_mapper=sp_shard)
         k_local = ttnn.from_torch(
             k_bc,
             device=mesh,
@@ -385,7 +386,7 @@ def test_indexer_score_sptp_fused_4d(case_id, heads):
         # q/w: SP-shard seq (dim 2), then split those rows over TP (mesh_partition) -> each device owns Sq_sp/tp rows.
         qw_shard = ttnn.ShardTensor2dMesh(mesh, mesh_shape=(SP2, TP2), dims=(2, None))
         q_dev = ttnn.from_torch(q_g, device=mesh, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, mesh_mapper=qw_shard)
-        w_dev = ttnn.from_torch(w_g, device=mesh, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, mesh_mapper=qw_shard)
+        w_dev = to_device(w_g, mesh, mesh_mapper=qw_shard)
         q_dev = ttnn.mesh_partition(q_dev, dim=2, cluster_axis=TP2_AXIS)
         w_dev = ttnn.mesh_partition(w_dev, dim=2, cluster_axis=TP2_AXIS)
 
