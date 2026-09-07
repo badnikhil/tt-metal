@@ -198,6 +198,7 @@ class TTSpatialCrossAttention:
         num_cams (int): Number of cameras.
         batch_first (bool): Whether the first dimension of input is batch_size.
         deformable_attention (dict): Config for MSDeformableAttention.
+        spatial_shapes: Multi-scale feature shapes [num_levels, 2]
         **kwargs: Additional arguments.
     """
 
@@ -209,6 +210,7 @@ class TTSpatialCrossAttention:
         num_cams: int = 6,
         batch_first: bool = True,
         deformable_attention: Optional[dict] = None,
+        spatial_shapes=None,
         **kwargs,
     ):
         self.device = device
@@ -228,7 +230,9 @@ class TTSpatialCrossAttention:
             batch_first=batch_first,
         )
 
-        self.deformable_attention = TTMSDeformableAttention(deform_config, device, params)
+        self.deformable_attention = TTMSDeformableAttention(
+            deform_config, device, params, spatial_shapes=spatial_shapes
+        )
 
     def forward(
         self,
