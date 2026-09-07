@@ -677,7 +677,9 @@ void bind_sdpa(nb::module_& mod) {
         valid length. On chunked shapes (Q shorter than the per-device K) the kernels derive it on-device as
         kv_actual_isl[0] + chunk and the program hash does not key it, so one program serves every chunk
         depth; on non-chunked shapes only the slot comes from the tensor and logical_n is used as passed.
-        Sliding-window attention is not supported on this path.
+        Sliding-window attention is not supported on this path. The tensor values are read unchecked on
+        device: the caller guarantees kv_actual_isl[0] is tile-aligned and below the cache capacity, and
+        slot_id[0] is below the user count.
         Cache fold, both paths: the cache batch read is slot * kv_cache_num_layers + kv_cache_layer_idx,
         with slot = kv_cache_batch_idx (host) or slot_id[0] (device), mirroring update_padded_kv_cache;
         the defaults (1, 0) make it the identity.

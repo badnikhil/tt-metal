@@ -1038,8 +1038,9 @@ ttsl::hash::hash_t RingJointSDPADeviceOperation::compute_program_hash(
         args.kv_cache_batch_idx.has_value(),
         kv_pad_rotation_enabled,
         tensor_args.has_metadata(),
-        // The reader/writer bake a TensorAccessorArgs per metadata tensor into their compile-time args, so a
-        // different memory config needs its own program; only the config is keyed, never the value.
+        // The reader/writer bake a TensorAccessorArgs per metadata tensor into their compile-time args. The
+        // validator pins the tensors to one form, so this key is defense in depth: should that pin ever relax, a
+        // different memory config still gets its own program. Only the config is keyed, never the value.
         tensor_args.slot_id.has_value() ? tensor_args.slot_id->memory_config() : tt::tt_metal::MemoryConfig{},
         tensor_args.kv_actual_isl.has_value() ? tensor_args.kv_actual_isl->memory_config()
                                               : tt::tt_metal::MemoryConfig{},
