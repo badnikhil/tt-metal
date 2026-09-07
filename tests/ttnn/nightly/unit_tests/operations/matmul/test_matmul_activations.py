@@ -742,7 +742,7 @@ def run_test_matmul_dram_sharded_with_bias_and_activation(
             atol = 0.01 * K
             rtol = 3.0 * K
             pcc_threshold = 0.99
-        elif activation_name in ["relu6", "tanh", "selu", "softplus"]:
+        elif activation_name in ["relu6", "tanh", "selu"]:
             # Relaxed tolerances
             atol = 0.008 * K
             rtol = 2.5 * K
