@@ -109,7 +109,7 @@ runs:
         echo "Syncing to workers: ${workers[*]}"
 
         printf '%s\n' "${workers[@]}" | xargs -P 0 -I{} \
-          rsync -rlptW --inplace --partial -e 'ssh -l user -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null' "$GITHUB_WORKSPACE/" "{}:${GITHUB_WORKSPACE}/"
+          rsync -rlptW --omit-dir-times --inplace --partial -e 'ssh -l user -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null' "$GITHUB_WORKSPACE/" "{}:${GITHUB_WORKSPACE}/"
 
     - name: Update submodules on all workers
       shell: bash
