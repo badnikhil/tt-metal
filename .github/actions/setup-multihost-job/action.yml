@@ -90,7 +90,7 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        mpirun --pernode bash -c 'command -v rsync || sudo apt-get install -y --no-install-recommends rsync'
+        mpirun --pernode bash -c 'command -v rsync || sudo apt update && sudo apt-get install -y --no-install-recommends rsync'
 
     - name: Create workspace directory on all workers
       shell: bash
@@ -108,6 +108,12 @@ runs:
 
         printf '%s\n' "${workers[@]}" | xargs -P 0 -I{} \
           rsync -aW --inplace --partial -e 'ssh -l user' "$GITHUB_WORKSPACE/" "{}:${GITHUB_WORKSPACE}/"
+
+    - name: Update submodules on all workers
+      shell: bash
+      run: |
+        set -euo pipefail
+        mpirun --pernode git -C "$GITHUB_WORKSPACE" submodule update --init --recursive
 
     - name: Extract build and install wheel on all nodes
       shell: bash

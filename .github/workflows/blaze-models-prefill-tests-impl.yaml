@@ -182,6 +182,10 @@ jobs:
       PATH: "/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
       VIRTUAL_ENV: /opt/venv
       HOME: /home/user
+      TT_METAL_HOME: ${{ github.workspace }}
+      TT_METAL_RUNTIME_ROOT: ${{ github.workspace }}
+      PYTHONPATH: ${{ github.workspace }}
+      LD_LIBRARY_PATH: ${{ github.workspace }}/build/lib
       # /ci is the NFS volume shared with the runner; worker /home/user is per-node, invisible to it.
       # Rank 0 writes; the run/attempt/job subpath keeps reused-PVC runs from colliding.
       PREFILL_SUMMARIES: /ci/prefill_summaries/${{ github.run_id }}-${{ github.run_attempt }}/${{ inputs.resource-prefix }}-${{ inputs.sp-config }}-${{ strategy.job-index }}
@@ -205,7 +209,6 @@ jobs:
         with:
           build-artifact-name: ${{ inputs.build-artifact-name }}
           wheel-artifact-name: ${{ inputs.wheel-artifact-name }}
-          create-pipeline-dir: "false"
           auto-triage: ${{ inputs.hang-detection-timeout > 0 }}
           hang-detection-timeout: ${{ inputs.hang-detection-timeout }}
           triage-job-info: "leg: ${{ matrix.test-group.name }} | sku: ${{ matrix.test-group.sku }}"
@@ -214,7 +217,7 @@ jobs:
         if: ${{ matrix.test-group.fabric_profile == 'torus_xy' }}
         shell: bash
         run: |
-          echo "TT_MESH_GRAPH_DESC_PATH=/home/user/tt-metal/tt_metal/fabric/mesh_graph_descriptors/single_bh_galaxy_torus_xy_graph_descriptor.textproto" >> "$GITHUB_ENV"
+          echo "TT_MESH_GRAPH_DESC_PATH=$GITHUB_WORKSPACE/tt_metal/fabric/mesh_graph_descriptors/single_bh_galaxy_torus_xy_graph_descriptor.textproto" >> "$GITHUB_ENV"
           echo "PREFILL_TORUS_XY_CERTIFIED=1" >> "$GITHUB_ENV"
 
       - name: ${{ matrix.test-group.name }}
@@ -222,7 +225,7 @@ jobs:
         timeout-minutes: ${{ matrix.test-group.timeout }}
         uses: ./.github/actions/run-with-log
         with:
-          working-directory: /home/user/tt-metal
+          working-directory: ${{ github.workspace }}
           log-file: generated/test_logs/${{ matrix.test-group.name }}.log
           run: |
             CMD=$(cat << 'EOF'
@@ -242,7 +245,7 @@ jobs:
       - name: 🧾 Surface test log
         if: always() && !cancelled()
         continue-on-error: true
-        working-directory: /home/user/tt-metal
+        working-directory: ${{ github.workspace }}
         run: |
           shopt -s nullglob
           logs=(generated/test_logs/*.log)
@@ -261,7 +264,7 @@ jobs:
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: test-log-${{ matrix.test-group.name }} (attempt ${{ github.run_attempt }})
-          path: /home/user/tt-metal/generated/test_logs/**
+          path: ${{ github.workspace }}/generated/test_logs/**
           if-no-files-found: warn
           retention-days: 30
 
@@ -350,7 +353,7 @@ jobs:
           config: |
             {
               "model": "${{ vars.AI_SUMMARY_MODEL }}",
-              "workspace": "/home/user/tt-metal",
+              "workspace": "${{ github.workspace }}",
               "input_dirs": ["generated/test_logs"],
               "output_dir": "generated/ai_summaries"
             }
