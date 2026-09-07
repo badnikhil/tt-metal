@@ -13,12 +13,13 @@ The ReduceDeviceOperation uses 3 ProgramFactory variants:
     MULTI_CORE_HW which also maps to ReduceSingleCoreHwProgramFactory
 
 compute_program_hash() includes:
-  math_op, dim, scaler, output_mem_config, output_dtype, compute_kernel_config,
+  math_op, dim, scaler_mode, output_mem_config, output_dtype, compute_kernel_config,
   sub_core_grids, negate, program_factory.index(), input dtype,
   input memory_config, input padded_shape.
 
-override_runtime_arguments() only updates buffer addresses — shape/work distribution
-changes require separate cache entries (padded_shape is in hash).
+It deliberately EXCLUDES the two scalar floats (scaler / post_mul_scaler): they reach the
+kernels as common runtime args, so distinct scalar values share one program (#54180), and
+override_runtime_arguments() re-applies them on a cache hit.
 """
 
 import pytest
@@ -37,17 +38,17 @@ def isolate_program_cache(device):
     device.disable_and_clear_program_cache()
 
 
-def run_reduce_op(device, op, shape, dim, dtype=ttnn.bfloat16, memory_config=ttnn.DRAM_MEMORY_CONFIG):
-    """Run a reduce op on device and return (torch_result, ttnn_result)."""
+def run_reduce_op(device, op, shape, dim, dtype=ttnn.bfloat16, memory_config=ttnn.DRAM_MEMORY_CONFIG, scalar=1.0):
+    """Run a reduce op on device and return (torch_result, ttnn_result). ttnn(x, scalar=s) == torch(s * x)."""
     torch_dtype = {ttnn.bfloat16: torch.bfloat16, ttnn.float32: torch.float32}[dtype]
     torch_a = torch.rand(shape, dtype=torch_dtype) + 0.1
 
     ttnn_ops = {ttnn.sum: torch.sum, ttnn.max: torch.amax, ttnn.min: torch.amin}
-    torch_result = ttnn_ops[op](torch_a, dim=dim, keepdim=True)
+    torch_result = ttnn_ops[op](scalar * torch_a, dim=dim, keepdim=True)
 
     tt_a = ttnn.from_torch(torch_a, layout=ttnn.TILE_LAYOUT, device=device, memory_config=memory_config)
     with device.cache_entries_counter.measure():
-        tt_result = op(tt_a, dim=dim, keepdim=True, memory_config=memory_config)
+        tt_result = op(tt_a, dim=dim, keepdim=True, memory_config=memory_config, scalar=scalar)
     tt_result = ttnn.to_torch(tt_result)
 
     return torch_result, tt_result
@@ -289,3 +290,99 @@ def test_reduce_cache_miss_sub_core_grids(device, isolate_program_cache):
     )
 
     assert device.cache_entries_counter.total == 2
+
+
+# =============================================================================
+# Scalar values are runtime args (#54180): one program must serve every value
+# =============================================================================
+
+
+@pytest.mark.parametrize("op", [ttnn.sum, ttnn.max, ttnn.min])
+@pytest.mark.parametrize("dim", [-1, -2])
+def test_reduce_cache_reuse_across_scalars(device, isolate_program_cache, op, dim):
+    """Different scalar values -> 1 cache entry, and each result is correct."""
+    torch.manual_seed(0)
+    shape = [1, 1, 64, 64]
+
+    for scalar in [1.0, 0.5, 2.0]:
+        torch_ref, tt_out = run_reduce_op(device, op, shape, dim=dim, scalar=scalar)
+        # test for equivalance
+        assert_numeric_metrics(
+            torch_ref,
+            tt_out,
+            pcc_threshold=0.999,
+            rtol=0.02,
+            atol=0.3,
+            frobenius_threshold=0.02,
+        )
+
+    assert device.cache_entries_counter.total == 1
+
+
+def test_reduce_cache_reuse_across_scalars_hw(device, isolate_program_cache):
+    """Different scalar values over dim=None (HW factory) -> no new cache entries.
+
+    dim=None lowers to several ops, so the count is not 1; the point is that it does not grow
+    with the number of distinct scalars (3 scalars would cost 15 if the value were hashed).
+    """
+    torch.manual_seed(0)
+    shape = [1, 1, 64, 64]
+
+    for scalar in [0.5, 2.0, -3.0]:
+        torch_ref, tt_out = run_reduce_op(device, ttnn.sum, shape, dim=None, scalar=scalar)
+        # A dim=None reduce yields one element, so correlation is undefined.
+        # test for equivalance
+        assert_numeric_metrics(
+            torch_ref,
+            tt_out,
+            pcc_threshold=0.999,
+            rtol=0.02,
+            atol=0.3,
+            frobenius_threshold=0.02,
+            check_pcc=False,
+        )
+
+    assert device.cache_entries_counter.total == 5
+
+
+def test_reduce_int32_identity_scalar_is_not_lossy(device, isolate_program_cache):
+    """An Int32 reduce with scalar=1.0 must stay bit-exact above 2^24.
+
+    One program now serves every scalar, so the post-multiply is compiled in even when the caller
+    passes none, and it brackets Int32 with fp32 typecasts. The kernel must skip a 1.0f scalar at
+    runtime rather than execute a lossy multiply-by-one.
+    """
+    # 31 * 2^20 + (2^20 + 1) == 2^25 + 1, not representable in fp32 (ulp at 2^25 is 4).
+    row = torch.full((32,), 1048576, dtype=torch.int32)
+    row[0] = 1048577
+    torch_a = row.reshape(1, 1, 1, 32).expand(1, 1, 32, 32).contiguous()
+
+    tt_a = ttnn.from_torch(torch_a, layout=ttnn.TILE_LAYOUT, device=device, dtype=ttnn.int32)
+    tt_out = ttnn.to_torch(ttnn.sum(tt_a, dim=-1, keepdim=True, scalar=1.0))
+
+    assert torch.all(tt_out == 2**25 + 1)
+
+
+@pytest.mark.parametrize("op", [ttnn.sum, ttnn.max, ttnn.min])
+@pytest.mark.parametrize("shape", [[1, 1, 32, 32], [1, 1, 64, 64]], ids=["single-tile", "multi-tile"])
+def test_reduce_hw_negative_scalar(device, isolate_program_cache, op, shape):
+    """A negative scalar over dim=None must be correct on the HW path.
+
+    The host used to hand REDUCE_SCALAR sqrt(scaler) -- NaN for a negative value -- which forced
+    negative scalars onto the two-step W-then-H path. The scalar is now applied after the
+    reduction, so both signs run the same program.
+    """
+    torch.manual_seed(0)
+
+    for scalar in [-3.0, -0.25, 2.0]:
+        torch_ref, tt_out = run_reduce_op(device, op, shape, dim=None, scalar=scalar)
+        # test for equivalance
+        assert_numeric_metrics(
+            torch_ref,
+            tt_out,
+            pcc_threshold=0.999,
+            rtol=0.02,
+            atol=0.3,
+            frobenius_threshold=0.02,
+            check_pcc=False,
+        )
