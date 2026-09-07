@@ -150,19 +150,36 @@ inline void _relu_min_(T threshold)
     {
         if constexpr (std::is_same_v<VectorType, sfpi::vInt>)
         {
-            // SFPSWAP orders operands as sign+magnitude, so a 2's complement integer
-            // threshold has to be re-encoded before it is loaded. Scoped to this branch
-            // because it is only meaningful for an integer threshold -- applying it to a
-            // float would reinterpret the value, not convert it.
-            int scalar = static_cast<int>(threshold);
+            // SFPSWAP orders its operands as sign+magnitude, so both of them have to be in
+            // that form before the compare. They get there by different routes, and the two
+            // have to agree:
+            //
+            //   the input      arrives through SFPLOAD, so the *instruction mode* converts
+            //                  it. InstrModLoadStore::INT32 (SFP format I32) is the mode
+            //                  that translates DEST's two's complement into sign+magnitude
+            //                  on the way in, and back again on the SFPSTORE.
+            //   the threshold  is written straight into LREG2 by _sfpu_load_imm32_, which
+            //                  bypasses any load conversion, so it is re-encoded by hand
+            //                  here to match what the input will look like.
+            //
+            // Using INT32_2S_COMP (SFP format SM32) here instead is what tt-metal #55643
+            // was: that mode loads raw, so the input stayed two's complement while the
+            // threshold was sign+magnitude, and SFPSWAP compared two different encodings.
+            // It is the right mode only where DEST already holds sign+magnitude.
+            //
+            // Scoped to this branch because the re-encoding is only meaningful for an
+            // integer threshold -- applying it to a float would reinterpret, not convert.
+            const int scalar       = static_cast<int>(threshold);
+            std::uint32_t sign_mag = static_cast<std::uint32_t>(scalar);
             if (scalar < 0)
             {
-                scalar  = -scalar;
-                int res = 0x80000000 | (scalar & 0x7FFFFFFF);
-                scalar  = res;
+                // Negate in unsigned: -INT_MIN is signed overflow. INT_MIN has no
+                // sign+magnitude form either (the magnitude field is 31 bits), so it
+                // necessarily saturates to -(2^31 - 1) rather than round-tripping.
+                sign_mag = 0x80000000u | (-static_cast<std::uint32_t>(scalar) & 0x7FFFFFFFu);
             }
-            _sfpu_load_imm32_(p_sfpu::LREG2, scalar);
-            sfpload_instr_mod = InstrModLoadStore::INT32_2S_COMP;
+            _sfpu_load_imm32_(p_sfpu::LREG2, sign_mag);
+            sfpload_instr_mod = InstrModLoadStore::INT32;
         }
         else
         {
