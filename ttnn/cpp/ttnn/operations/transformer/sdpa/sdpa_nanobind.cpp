@@ -669,14 +669,15 @@ void bind_sdpa(nb::module_& mod) {
         to KV-pad-aware rotation: logical_n remains the total valid KV length after this iteration,
         while kv_actual_isl marks the prior valid cache length before the current chunk.
 
-        Metadata (trace-safe) path -- the one description of the contract, shared with ring_mla: pass
-        slot_id and kv_actual_isl_tensor together, each a 1-element uint32 ROW_MAJOR DRAM tensor
-        replicated across the mesh, instead of the host kv_cache_batch_idx / kv_actual_isl (mixing the two
-        forms is rejected). The kernels read the cache-user slot and the prior valid global KV length from
-        element [0] at kernel start, so a captured trace re-targets them by updating the two tensors in
-        place between replays. logical_n stays the real total valid length: the kernels derive it
-        on-device as kv_actual_isl[0] + chunk and the program hash does not key it on this path, so one
-        program serves every chunk depth. Sliding-window attention is not supported on this path.
+        Metadata (trace-safe) path (also ring_mla's): pass slot_id and kv_actual_isl_tensor together, each a
+        1-element uint32 ROW_MAJOR DRAM tensor replicated across the mesh, instead of the host
+        kv_cache_batch_idx / kv_actual_isl (mixing the two forms is rejected). The kernels read the cache-user
+        slot and the prior valid global KV length from element [0] at kernel start, so a captured trace
+        re-targets them by updating the two tensors in place between replays. logical_n stays the real total
+        valid length. On chunked shapes (Q shorter than the per-device K) the kernels derive it on-device as
+        kv_actual_isl[0] + chunk and the program hash does not key it, so one program serves every chunk
+        depth; on non-chunked shapes only the slot comes from the tensor and logical_n is used as passed.
+        Sliding-window attention is not supported on this path.
         Cache fold, both paths: the cache batch read is slot * kv_cache_num_layers + kv_cache_layer_idx,
         with slot = kv_cache_batch_idx (host) or slot_id[0] (device), mirroring update_padded_kv_cache;
         the defaults (1, 0) make it the identity.
@@ -770,8 +771,8 @@ void bind_sdpa(nb::module_& mod) {
                 Defaults to 1.
             kv_cache_layer_idx (int, optional): This call's layer in that fold. Defaults to 0.
 
-        Metadata (trace-safe) path and cache fold: same contract as ring_joint_scaled_dot_product_attention;
-        see its docstring for the one full description.
+        Metadata (trace-safe) path and cache fold: as ring_joint_scaled_dot_product_attention (see its
+        docstring).
 
         Returns:
             (ttnn.Tensor, ttnn.Tensor):

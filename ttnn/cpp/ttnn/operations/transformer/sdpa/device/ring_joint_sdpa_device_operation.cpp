@@ -218,10 +218,10 @@ void validate_ring_joint_all_gather_on_program_cache_miss(
     }
 }
 
-// Re-validate the scalar args that are runtime-patched on a program-cache hit and therefore NOT part of
-// compute_program_hash: kv_cache_batch_idx (indexed KV cache) and logical_n / kv_actual_isl (KV-pad
-// rotation). Everything else is keyed by the hash, so a cache hit guarantees it already passed at miss
-// time. Shared by validate_on_program_cache_miss and validate_on_program_cache_hit to avoid divergence.
+// Checks the program hash does not key, so they run on every dispatch: the runtime-patched host scalars
+// (kv_cache_batch_idx, logical_n, kv_actual_isl), the metadata tensors' form and their exclusivity with the
+// host scalars, and the (user, layer) fold bounds. Shared by the miss and hit validators so they cannot
+// diverge.
 void validate_runtime_patched_scalars(const RingJointSDPAParams& args, const RingJointSDPAInputs& tensor_args) {
     TT_FATAL(
         tensor_args.slot_id.has_value() == tensor_args.kv_actual_isl.has_value(),
@@ -411,8 +411,6 @@ void RingJointSDPADeviceOperation::validate_on_program_cache_miss(
         tensor_args.joint_q.has_value() == has_joint_tensors && tensor_args.joint_k.has_value() == has_joint_tensors &&
             tensor_args.joint_v.has_value() == has_joint_tensors,
         "Joint tensors must be provided all together or omitted altogether");
-    // Metadata tensors (slot_id / kv_actual_isl) are checked in validate_runtime_patched_scalars, which runs on
-    // cache hits too — the hash does not key on them.
     TT_FATAL(
         !(tensor_args.has_metadata() && args.has_sliding_window()),
         "sliding window is not supported on the metadata path: the compact halo layout is derived from the host "
@@ -663,13 +661,11 @@ void RingJointSDPADeviceOperation::validate_on_program_cache_miss(
         TT_FATAL(!args.is_balanced, "is_cross is non-causal; balanced zigzag load-balancing is causal-only");
     }
 
-    // Value checks for the runtime-patched scalars (kv_cache_batch_idx, logical_n, kv_actual_isl).
-    // Also invoked on every program-cache hit, where these values vary but the rest is hash-pinned.
     validate_runtime_patched_scalars(args, tensor_args);
 
     if (has_kv_pad_rotation) {
-        // Shape/flag preconditions are pinned by the program hash. The logical_n / kv_actual_isl value
-        // checks live in validate_runtime_patched_scalars (called below; also runs on cache hits).
+        // Shape/flag preconditions; hash-keyed, so once at miss time suffices. The logical_n / kv_actual_isl
+        // value checks live in validate_runtime_patched_scalars.
         TT_FATAL(
             is_chunked,
             "KV-pad rotation (host kv_actual_isl or metadata) requires chunked-prefill input (Q.seq < K.seq). "
@@ -950,9 +946,8 @@ void RingJointSDPADeviceOperation::validate_on_program_cache_miss(
 
 void RingJointSDPADeviceOperation::validate_on_program_cache_hit(
     const RingJointSDPAParams& args, const RingJointSDPAInputs& tensor_args) {
-    // On a cache hit everything except the runtime-patched scalars is guaranteed by the program hash to
-    // match a prior miss that already passed full validation. Re-check only the values that the hash no
-    // longer keys on (kv_cache_batch_idx, logical_n, kv_actual_isl) — they are re-patched per dispatch.
+    // The hash guarantees everything it keys matched a miss that passed full validation; re-check only what it
+    // leaves out.
     validate_runtime_patched_scalars(args, tensor_args);
 }
 

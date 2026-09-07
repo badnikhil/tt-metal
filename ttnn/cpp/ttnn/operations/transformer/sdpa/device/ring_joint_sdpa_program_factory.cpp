@@ -563,16 +563,14 @@ void write_runtime_arg(RuntimeArgsData& args, uint32_t index, uint32_t value, co
     args[index] = value;
 }
 
-// Tile-rows of the latent KV the fused all-gather must move for this chunk: the first
-// ceil(logical_n / chunk_global) block-cyclic slabs (a contiguous per-device page prefix), so an
-// oversized (growing) KV cache only moves kv_actual-sized data. Returns nullopt when KV-pad rotation
-// is off (gather the full input). Shared by the descriptor-create path (so the first / cache-miss
-// dispatch is bounded) and the cache-hit override path.
+// Host bound on the fused all-gather extent, in tile rows per (batch, head), so an oversized (growing) KV cache
+// only moves kv_actual-sized data: ceil(logical_n / chunk_global) slabs == a contiguous page prefix. Shared
+// by the descriptor-create path and the cache-hit override path. Returns nullopt unless the host passes
+// kv_actual_isl: without rotation the full input is gathered, and on the metadata path the all-gather
+// kernels clamp the extent from kv_actual_isl[0] on every dispatch -- a bound taken from the host logical_n
+// there (off the hash, not refreshed on hits) would outlive the chunk it was computed for.
 std::optional<uint32_t> compute_gather_valid_Ht(
     const ttnn::prim::RingJointSDPAParams& args, const ttnn::prim::RingJointSDPAInputs& tensor_args) {
-    // Only the host path has a length to bound with. On the metadata path logical_n is off the program hash and
-    // not refreshed on hits, so a bound taken from it here would outlive the chunk it was computed for; the
-    // all-gather kernels clamp the extent from kv_actual_isl[0] on every dispatch instead.
     if (!args.has_kv_pad_rotation()) {
         return std::nullopt;
     }
@@ -1651,7 +1649,7 @@ tt::tt_metal::ProgramDescriptor build_ring_joint_sdpa_program_descriptor(
         compile_time_single_valid_kv_chunk_mask,
         sliding_window_size,
         // Slot 35: trace-safe KV-pad derivation -- the writer recomputes logical_nt + masks from
-        // metadata[1] on-device (it's dataflow).
+        // kv_actual_isl[0] on-device (it's dataflow).
         static_cast<uint32_t>(kv_pad_from_metadata),
         // Slot 36: sharded-joint flag. When true, one shard per ring iteration; do_joint_kv fires every iter.
         static_cast<uint32_t>(joint_is_sharded),
@@ -2890,7 +2888,7 @@ tt::tt_metal::ProgramDescriptor build_ring_joint_sdpa_program_descriptor(
         // indexed-mode input_batch_base scalar is re-patched in apply_ring_joint_scalar_runtime_args.
         // Single-slot gather is engaged whenever the op is in indexed mode -- either a host
         // kv_cache_batch_idx (scalar path) or a metadata tensor (trace-safe path, where the slot is read
-        // on-device from metadata[0]). On the metadata path the host slot is absent, so pass a valid
+        // on-device from slot_id[0]). On the metadata path the host slot is absent, so pass a valid
         // placeholder (0) to turn on single-slot structure; the AG reader recomputes the real offset.
         const bool ag_indexed = ttnn::prim::indexed_kv_cache_active(args, tensor_args);
         const std::optional<uint32_t> gather_slice_idx =

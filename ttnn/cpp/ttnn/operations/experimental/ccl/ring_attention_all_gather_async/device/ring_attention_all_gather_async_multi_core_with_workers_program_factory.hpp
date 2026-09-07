@@ -147,8 +147,8 @@ void ring_attention_all_gather_async_multi_core_with_workers_helper(
     std::optional<uint32_t> gather_valid_Ht = std::nullopt,
     // Trace-safe slot select: when set (with input_batch_slice_idx engaged), the readers recompute the
     // single-slot gather offset from slot = slot_id[0] on-device, so a captured trace replays across
-    // cache slots. slot_id / kv_actual_isl are 1-element uint32 DRAM tensors (were metadata[0] /
-    // metadata[1]); the reader uses slot_id[0] for the gather slot and kv_actual_isl[0] for the gather
+    // cache slots. slot_id / kv_actual_isl are 1-element uint32 DRAM tensors; the reader
+    // uses slot_id[0] for the gather slot and kv_actual_isl[0] for the gather
     // extent, and the writer uses kv_actual_isl[0]. std::nullopt => take the host input_batch_base
     // (default; existing callers unaffected). Both must be supplied together on the metadata path.
     std::optional<Tensor> slot_id = std::nullopt,

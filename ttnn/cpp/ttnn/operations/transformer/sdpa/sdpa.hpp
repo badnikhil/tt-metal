@@ -112,8 +112,8 @@ std::tuple<ttnn::Tensor, ttnn::Tensor, ttnn::Tensor> ring_joint_scaled_dot_produ
     std::optional<uint32_t> sliding_window_size = std::nullopt,
     const std::optional<ttnn::Tensor>& persistent_output_buffer_joint_k = std::nullopt,
     const std::optional<ttnn::Tensor>& persistent_output_buffer_joint_v = std::nullopt,
-    // Trace-safe metadata path and the (user, layer) cache fold: the contract is described once, in the
-    // ring_joint_scaled_dot_product_attention docstring (sdpa_nanobind.cpp). nullopt layers/idx resolve to 1/0.
+    // Metadata / cache-fold contract: ring_joint_scaled_dot_product_attention docstring (sdpa_nanobind.cpp).
+    // nullopt layers/idx resolve to 1/0.
     const std::optional<ttnn::Tensor>& slot_id = std::nullopt,
     const std::optional<ttnn::Tensor>& kv_actual_isl_tensor = std::nullopt,
     std::optional<uint32_t> kv_cache_num_layers = std::nullopt,
@@ -140,8 +140,8 @@ std::tuple<ttnn::Tensor, ttnn::Tensor> ring_mla(
     ttnn::ccl::CoreAllocationStrategy core_allocation_strategy = ttnn::ccl::CoreAllocationStrategy::ROW_MAJOR,
     std::optional<uint32_t> kv_cache_batch_idx = std::nullopt,
     std::optional<uint32_t> kv_actual_isl = std::nullopt,
-    // Same metadata / cache-fold contract as ring_joint_scaled_dot_product_attention above (one description,
-    // in its docstring in sdpa_nanobind.cpp). nullopt layers/idx resolve to 1/0.
+    // Metadata / cache-fold contract: ring_joint_scaled_dot_product_attention docstring (sdpa_nanobind.cpp).
+    // nullopt layers/idx resolve to 1/0.
     const std::optional<ttnn::Tensor>& slot_id = std::nullopt,
     const std::optional<ttnn::Tensor>& kv_actual_isl_tensor = std::nullopt,
     std::optional<uint32_t> kv_cache_num_layers = std::nullopt,

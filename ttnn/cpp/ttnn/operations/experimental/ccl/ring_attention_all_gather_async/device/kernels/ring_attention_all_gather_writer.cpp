@@ -120,7 +120,7 @@ void kernel_main() {
     // output-buffer addrs, before the fabric args). Identical formula to the all-gather reader / host
     // compute_gather_valid_Ht.
     if constexpr (has_metadata) {
-        // kv_actual_isl is a 1-element uint32 DRAM tensor (was metadata[1]); read its page 0.
+        // kv_actual_isl is a 1-element uint32 DRAM tensor; read its page 0.
         const uint32_t kv_actual_isl_addr = get_arg_val<uint32_t>(arg_idx++);
         const uint32_t chunk_local_tiles = get_arg_val<uint32_t>(arg_idx++);
         Noc meta_noc;

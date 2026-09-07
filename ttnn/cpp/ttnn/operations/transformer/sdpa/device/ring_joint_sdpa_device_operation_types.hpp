@@ -158,13 +158,10 @@ struct RingJointSDPAInputs {
     std::optional<Tensor> gathered_joint_k;
     std::optional<Tensor> gathered_joint_v;
 
-    // Trace-safe metadata path (opt-in): two 1-element uint32 DRAM tensors holding the per-chunk
-    // scalars that would otherwise be host-computed and frozen by a ttnn trace. slot_id holds the
-    // cache-user slot (was metadata[0]); kv_actual_isl holds the prior valid global KV length (was
-    // metadata[1]). When present (both together), the readers/writer compute
-    // kv_cache_batch_idx = slot_id * kv_cache_num_layers + kv_cache_layer_idx and derive
-    // logical_nt / q-mapping / ring masks on-device from kv_actual_isl, so one captured program
-    // replays across chunks. std::nullopt => classic host-scalar path (unchanged).
+    // Trace-safe metadata path (both or neither): 1-element uint32 DRAM tensors the kernels read at start --
+    // slot_id[0] is the cache-user slot, kv_actual_isl[0] the prior valid global KV length -- so one captured
+    // program replays across chunks and users. Contract: ring_joint_scaled_dot_product_attention docstring
+    // (sdpa_nanobind.cpp).
     std::optional<Tensor> slot_id;
     std::optional<Tensor> kv_actual_isl;
 
@@ -199,7 +196,8 @@ struct RingJointSDPAInputs {
 
 // KV-pad rotation is on when the host passes kv_actual_isl, or when the chunked metadata path derives it
 // on-device. Every host decision that hangs off the rotation mode (program hash, compile-time zeroing,
-// validation, the all-gather extent) goes through this one rule so they cannot disagree.
+// validation) goes through this one rule so they cannot disagree. The all-gather bound
+// (compute_gather_valid_Ht) is the deliberate exception: it needs a host length, so it is host-path only.
 inline bool kv_pad_rotation_active(const RingJointSDPAParams& args, const RingJointSDPAInputs& tensor_args) {
     return args.has_kv_pad_rotation() || tensor_args.kv_pad_from_metadata();
 }
