@@ -96,7 +96,8 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        mpirun --pernode mkdir -p "$GITHUB_WORKSPACE"
+        mpirun --pernode sudo mkdir -p "$GITHUB_WORKSPACE"
+        mpirun --pernode sudo chmod -R 777 "$GITHUB_WORKSPACE"
 
     - name: Rsync GITHUB_WORKSPACE to workers
       shell: bash
