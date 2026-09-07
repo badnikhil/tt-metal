@@ -1,18 +1,10 @@
 # SPDX-FileCopyrightText: © 2026 Tenstorrent USA, Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-"""
-THE LINK: ring_joint reading from the GQA chunked-KV cache (cache-read mode), SP=8 × TP=4 on (8,4).
-
-Ties the two validated building blocks together — the GQA chunked-KV cache write
-(test_kv_cache_gqa_sp_vs_ref) and the SP ring_joint op (test_ring_joint_sp_vs_ref) — into the actual
-chunked-prefill attention: write K/V into the cache, then run
-`ring_joint_scaled_dot_product_attention` with `kv_cache_batch_idx` + `kv_actual_isl` so it reads the
-accumulated prefix FROM the cache (block-cyclic, SP-sharded) and runs causal online-softmax over it.
-Grouped V (cache stays 4 heads → 1/chip; NO inflation). vs a full-causal-GQA torch golden.
-
-Single chunk = whole sequence (kv_actual_isl=0, logical_n=S) — the minimal cache-read verification;
-multi-chunk accumulation + SP-RoPE are follow-ups. This is the path that wires into prefill.py:124.
+"""ring_joint cache-read on (8,4), SP=8 x TP=4: write n_chunks of K/V into the GQA chunked-KV cache (block-cyclic,
+SP-sharded), then run the last chunk's queries through dense_sp_attention with the host kv_cache_batch_idx /
+kv_actual_isl so ring_joint reads the accumulated prefix from the cache, vs a full-causal GQA torch golden.
+Grouped V (cache stays NKV heads, 1/chip). The chunk / gather helpers live in ring_joint_cache_read_helpers.
 """
 
 import pytest
@@ -21,86 +13,23 @@ from loguru import logger
 
 import ttnn
 from models.common.utility_functions import comp_pcc
-from models.demos.deepseek_v3_d_p.tt.mla.utils import rotated_chip_positions
 from models.demos.deepseek_v3_d_p.utils.kv_cache_utils import init_kvpe_cache
 from models.demos.minimax_m3.tt.attention.dense_sp import dense_sp_attention
 from models.demos.minimax_m3.tt.ccl import CCLManager
 from models.demos.minimax_m3.utils.general_utils import get_default_num_links
 
 from ..test_factory import parametrize_mesh_with_fabric
-
-NQ, NKV, HEAD_DIM = 64, 4, 128
-# SP over mesh rows, TP over mesh cols: chunk tensors shard the sequence (dim 2) over rows and heads (dim 1) over
-# cols; the same pair drives the mapper on the way in and the composer on the way out.
-SP_AXIS = 0
-SHARD_DIMS = (2, 1)
-
-
-def _torch_gqa_causal(q, k, v):
-    rep = NQ // NKV
-    k, v = k.repeat_interleave(rep, dim=1), v.repeat_interleave(rep, dim=1)
-    s = q.shape[2]
-    scores = (q @ k.transpose(-1, -2)) * (HEAD_DIM**-0.5)
-    causal = torch.triu(torch.full((s, s), float("-inf")), diagonal=1)
-    return torch.softmax(scores + causal, dim=-1) @ v  # [1, NQ, S, HD]
-
-
-def bc_index(kv_actual, sp, chunk_local):
-    """Global positions of the chunk starting at kv_actual, in the chip-major block-cyclic order the SP shards hold."""
-    pos = rotated_chip_positions(kv_actual, sp, chunk_local)
-    return torch.tensor([pos[c][r] for c in range(sp) for r in range(chunk_local)], dtype=torch.long)
-
-
-def _shard(t, mesh_device, dtype):
-    rows, cols = tuple(mesh_device.shape)
-    return ttnn.from_torch(
-        t,
-        device=mesh_device,
-        dtype=dtype,
-        layout=ttnn.TILE_LAYOUT,
-        memory_config=ttnn.DRAM_MEMORY_CONFIG,
-        mesh_mapper=ttnn.ShardTensor2dMesh(mesh_device, mesh_shape=(rows, cols), dims=SHARD_DIMS),
-    )
-
-
-def make_kv_chunk(src, kv_actual, mesh_device, chunk_local):
-    """src [heads, S, HD] host K or V -> this chunk, block-cyclic, sharded, in the cache's bf8 dtype."""
-    sp = mesh_device.shape[0]
-    chunk = src[:, bc_index(kv_actual, sp, chunk_local), :].reshape(1, src.shape[0], sp * chunk_local, HEAD_DIM)
-    return _shard(chunk, mesh_device, ttnn.bfloat8_b)
-
-
-def make_q_chunk(q, kv_actual, mesh_device, chunk_local):
-    """q [1, NQ, S, HD] host -> the chunk's queries, block-cyclic, sharded."""
-    return _shard(q[:, :, bc_index(kv_actual, mesh_device.shape[0], chunk_local), :], mesh_device, ttnn.bfloat16)
-
-
-def sdpa_configs(mesh_device):
-    """The M3 dense SDPA program / compute configs (minimax3_gqa_causal_perf tuning)."""
-    grid = mesh_device.compute_with_storage_grid_size()
-    prog = ttnn.SDPAProgramConfig(
-        compute_with_storage_grid_size=ttnn.CoreCoord(grid.x - 1, grid.y),
-        q_chunk_size=128,
-        k_chunk_size=512,
-        exp_approx_mode=False,
-    )
-    kcfg = ttnn.WormholeComputeKernelConfig(
-        math_fidelity=ttnn.MathFidelity.HiFi4, math_approx_mode=False, fp32_dest_acc_en=False, packer_l1_acc=False
-    )
-    return prog, kcfg
-
-
-def gather_chunk(out, kv_actual, mesh_device, chunk_local):
-    """Per-chip [1, NQ/tp, chunk_local, HD] block-cyclic over the chunk at kv_actual -> [1, NQ, chunk_global, HD] in
-    natural order: one composed host read (rows -> seq, cols -> heads), then undo the block-cyclic permutation."""
-    rows, cols = tuple(mesh_device.shape)
-    chunk_global = rows * chunk_local
-    full_bc = ttnn.to_torch(
-        out, mesh_composer=ttnn.ConcatMesh2dToTensor(mesh_device, mesh_shape=(rows, cols), dims=SHARD_DIMS)
-    ).float()
-    inv = torch.empty(chunk_global, dtype=torch.long)
-    inv[bc_index(kv_actual, rows, chunk_local) - kv_actual] = torch.arange(chunk_global)
-    return full_bc[:, :, inv, :]
+from .ring_joint_cache_read_helpers import (
+    HEAD_DIM,
+    NKV,
+    NQ,
+    SP_AXIS,
+    gather_chunk,
+    make_kv_chunk,
+    make_q_chunk,
+    sdpa_configs,
+    torch_gqa_causal,
+)
 
 
 @parametrize_mesh_with_fabric(mesh_shapes=[(8, 4)], linear_fabric=True)
@@ -127,7 +56,7 @@ def test_ring_joint_cache_read_sp(mesh_device, device_params, n_chunks, chunk_lo
     q = torch.randn(1, NQ, cache_global, HEAD_DIM, dtype=torch.bfloat16) * 0.1
     k = torch.randn(1, NKV, cache_global, HEAD_DIM, dtype=torch.bfloat16) * 0.1
     v = torch.randn(1, NKV, cache_global, HEAD_DIM, dtype=torch.bfloat16) * 0.1
-    ref_full = _torch_gqa_causal(q.float(), k.float(), v.float())  # [1, NQ, cache_global, HD]
+    ref_full = torch_gqa_causal(q.float(), k.float(), v.float())  # [1, NQ, cache_global, HD]
     ref = ref_full[:, :, kv_actual_last:, :]  # golden for the LAST chunk's query positions
 
     ccl = CCLManager(mesh_device, num_links=get_default_num_links(mesh_device), topology=ttnn.Topology.Linear)

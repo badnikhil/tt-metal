@@ -1,10 +1,12 @@
 # SPDX-FileCopyrightText: © 2026 Tenstorrent USA, Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-"""ring_joint cache-read through the trace-safe metadata path: bit-exact vs the host-int path at two chunk depths
-served by ONE cached program (the real logical_n is off the hash), a cached program follows freshly allocated
-metadata tensors, the helper's chunk write lands in the tensor-selected slot, and one captured trace re-targets the
-cache-user slot by rewriting the metadata tensors between replays.
+"""ring_joint cache-read through the trace-safe metadata path, checked against the host-int path:
+  - bit-exact at two chunk depths served by one cached program (logical_n is off the hash on this path);
+  - a cached program follows freshly allocated metadata tensors;
+  - dense_sp's chunk write lands in the tensor-selected slot and offset;
+  - the op's rejections for this path (tensor form, host/tensor mix, rotation and fold preconditions);
+  - one captured trace re-targets the cache-user slot by rewriting the metadata tensors between replays.
 
 Extends test_ring_joint_cache_read_sp_vs_ref to two users and two layers so the on-device slot fold
 (slot_id[0] * kv_cache_num_layers + kv_cache_layer_idx) is exercised, not just slot 0 / layer 0. Both users hold
@@ -23,37 +25,21 @@ from models.demos.minimax_m3.tt.ccl import CCLManager
 from models.demos.minimax_m3.utils.general_utils import get_default_num_links
 
 from ..test_factory import parametrize_mesh_with_fabric
-from .test_ring_joint_cache_read_sp_vs_ref import (
+from .ring_joint_cache_read_helpers import (
     HEAD_DIM,
     NKV,
     NQ,
     SP_AXIS,
-    _torch_gqa_causal,
     gather_chunk,
+    host_scalar,
     make_kv_chunk,
     make_q_chunk,
+    meta_scalar,
     sdpa_configs,
+    torch_gqa_causal,
 )
 
 NUM_USERS, NUM_LAYERS, LAYER_IDX = 2, 2, 1
-
-
-def _meta_scalar(val, mesh_device):
-    """1-element uint32 replicated-DRAM scalar, the form update_padded_kv_cache and ring_joint read element [0] of."""
-    return ttnn.from_torch(
-        torch.tensor([val], dtype=torch.int64).reshape(1, 1, 1, 1),
-        device=mesh_device,
-        dtype=ttnn.uint32,
-        layout=ttnn.ROW_MAJOR_LAYOUT,
-        memory_config=ttnn.DRAM_MEMORY_CONFIG,
-        mesh_mapper=ttnn.ReplicateTensorToMesh(mesh_device),
-    )
-
-
-def _host_scalar(val):
-    return ttnn.from_torch(
-        torch.tensor([val], dtype=torch.int64).reshape(1, 1, 1, 1), dtype=ttnn.uint32, layout=ttnn.ROW_MAJOR_LAYOUT
-    )
 
 
 @parametrize_mesh_with_fabric(mesh_shapes=[(8, 4)], linear_fabric=True)
@@ -77,9 +63,7 @@ def test_ring_joint_cache_read_metadata_trace(
     q = torch.randn(1, NQ, cache_global, HEAD_DIM, dtype=torch.bfloat16) * 0.1
     k = [torch.randn(1, NKV, cache_global, HEAD_DIM, dtype=torch.bfloat16) * 0.1 for _ in range(NUM_USERS)]
     v = [torch.randn(1, NKV, cache_global, HEAD_DIM, dtype=torch.bfloat16) * 0.1 for _ in range(NUM_USERS)]
-    refs = [
-        _torch_gqa_causal(q.float(), k[u].float(), v[u].float())[:, :, kv_actual_last:, :] for u in range(NUM_USERS)
-    ]
+    refs = [torch_gqa_causal(q.float(), k[u].float(), v[u].float())[:, :, kv_actual_last:, :] for u in range(NUM_USERS)]
 
     ccl = CCLManager(mesh_device, num_links=get_default_num_links(mesh_device), topology=ttnn.Topology.Linear)
     cache_k = init_kvpe_cache(
@@ -153,8 +137,8 @@ def test_ring_joint_cache_read_metadata_trace(
     assert not torch.equal(host[0], host[1]), "users must produce distinct outputs for the slot check to mean anything"
 
     # Metadata tensors live outside the capture and are the only thing that changes between replays.
-    t_slot = _meta_scalar(0, mesh_device)
-    t_kv = _meta_scalar(kv_actual_last, mesh_device)
+    t_slot = meta_scalar(0, mesh_device)
+    t_kv = meta_scalar(kv_actual_last, mesh_device)
 
     def run_meta(slot_t, kv_t, q_t=tt_q, kv_actual=kv_actual_last):
         return dense_sp_attention(
@@ -176,11 +160,11 @@ def test_ring_joint_cache_read_metadata_trace(
     tt_q0 = make_q(0)
     host0 = run_host(0, tt_q0, 0)
     passing, pcc = comp_pcc(
-        _torch_gqa_causal(q.float(), k[0].float(), v[0].float())[:, :, :chunk_global, :], host0, 0.99
+        torch_gqa_causal(q.float(), k[0].float(), v[0].float())[:, :, :chunk_global, :], host0, 0.99
     )
     assert passing, f"host-int cache-read PCC fail for user 0 at depth 0: {pcc}"
     entries_before = mesh_device.num_program_cache_entries()
-    meta0_d0 = gather(run_meta(t_slot, _meta_scalar(0, mesh_device), tt_q0, 0), 0)
+    meta0_d0 = gather(run_meta(t_slot, meta_scalar(0, mesh_device), tt_q0, 0), 0)
     assert torch.equal(
         meta0_d0, host0
     ), f"metadata path != host-int path for user 0 at depth 0: max_abs={(meta0_d0 - host0).abs().max()}"
@@ -200,7 +184,7 @@ def test_ring_joint_cache_read_metadata_trace(
     # depth). That call hits the cached program, whose kernels hold the tensors' DRAM addresses as plain
     # runtime args, so the op must re-point them. The first tensors stay alive so the new ones cannot land at
     # the same addresses; a stale address would read slot 0 here and reproduce user 0's output.
-    t_slot_fresh, t_kv_fresh = _meta_scalar(1, mesh_device), _meta_scalar(kv_actual_last, mesh_device)
+    t_slot_fresh, t_kv_fresh = meta_scalar(1, mesh_device), meta_scalar(kv_actual_last, mesh_device)
     meta1 = gather(run_meta(t_slot_fresh, t_kv_fresh))
     assert torch.equal(meta1, host[1]), (
         f"cached program did not follow fresh metadata tensors: max_abs vs user 1={(meta1 - host[1]).abs().max()}, "
@@ -208,9 +192,9 @@ def test_ring_joint_cache_read_metadata_trace(
     )
 
     # With write_chunk the helper also writes the chunk, and on this path the write must follow the tensors, not
-    # the host slot_idx (left at its default 0 here on purpose). Blank user 1's last chunk, then let the helper
-    # rewrite it with the tensors pointing at user 1: a host-slot write would land in user 0 and the read of
-    # user 1 would see zeros; a host-offset write is caught the same way via kv_actual.
+    # the host slot_idx / kv_actual (left at their defaults 0 here on purpose). Blank user 1's last chunk, then
+    # let the helper rewrite it with the tensors pointing at user 1 / depth 1: a host-slot write would land in
+    # user 0 and a host-offset write in depth 0, and either way the read of user 1 would see zeros.
     zeros = torch.zeros(1, NKV, cache_global, HEAD_DIM, dtype=torch.bfloat16)
     for cache in (cache_k, cache_v):
         ttnn.experimental.deepseek_prefill.update_padded_kv_cache(
@@ -229,7 +213,7 @@ def test_ring_joint_cache_read_metadata_trace(
             cache_v,
             make_chunk(k[1][0], kv_actual_last),
             make_chunk(v[1][0], kv_actual_last),
-            kv_actual=kv_actual_last,
+            kv_actual=0,
             logical_n=cache_global,
             slot_id=t_slot_fresh,
             kv_actual_isl_tensor=t_kv_fresh,
@@ -296,9 +280,11 @@ def test_ring_joint_cache_read_metadata_trace(
         )
 
     # KV-pad rotation is implied by metadata on chunked shapes, so its preconditions must be enforced on this
-    # path too; zigzag balancing is one of them.
-    with expect_error(RuntimeError, "balanced"):
+    # path too; zigzag balancing is one of them. Sliding window is refused outright on this path.
+    with expect_error(RuntimeError, "KV-pad rotation .* does not support balanced"):
         direct_meta_call(is_balanced=True)
+    with expect_error(RuntimeError, "sliding window is not supported on the metadata path"):
+        direct_meta_call(sliding_window_size=128)
 
     # A host scalar next to the tensors would still steer the all-gather extent, so the mix is refused.
     with expect_error(RuntimeError, "metadata tensors replace the host"):
@@ -310,15 +296,15 @@ def test_ring_joint_cache_read_metadata_trace(
         direct_meta_call(kv_cache_layer_idx=NUM_LAYERS)
     with expect_error(RuntimeError, "kv_cache_num_layers must be >= 1"):
         direct_meta_call(kv_cache_num_layers=0)
-    # The fold is one formula on both paths, so the host form is bounded the same way.
+    with expect_error(RuntimeError, "exceeds the KV cache batch"):
+        direct_meta_call(kv_cache_num_layers=NUM_USERS * NUM_LAYERS + 1)
+    # The fold is one formula on both paths, so the host form is bounded the same way, including the folded
+    # index against the cache batch.
+    host_form = dict(slot_id=None, kv_actual_isl_tensor=None, kv_actual_isl=kv_actual_last)
     with expect_error(RuntimeError, "kv_cache_layer_idx=.* must be < kv_cache_num_layers"):
-        direct_meta_call(
-            slot_id=None,
-            kv_actual_isl_tensor=None,
-            kv_cache_batch_idx=1,
-            kv_actual_isl=kv_actual_last,
-            kv_cache_layer_idx=NUM_LAYERS,
-        )
+        direct_meta_call(kv_cache_batch_idx=1, kv_cache_layer_idx=NUM_LAYERS, **host_form)
+    with expect_error(RuntimeError, "is outside the KV cache batch"):
+        direct_meta_call(kv_cache_batch_idx=NUM_USERS, **host_form)
 
     tid = ttnn.begin_trace_capture(mesh_device, cq_id=0)
     out_tr = run_meta(t_slot, t_kv)
@@ -334,9 +320,9 @@ def test_ring_joint_cache_read_metadata_trace(
 
     try:
         replay_expecting(0)
-        ttnn.copy_host_to_device_tensor(_host_scalar(1), t_slot)  # re-target outside the trace
+        ttnn.copy_host_to_device_tensor(host_scalar(1), t_slot)  # re-target outside the trace
         replay_expecting(1)
-        ttnn.copy_host_to_device_tensor(_host_scalar(0), t_slot)  # back, to rule out a one-way latch
+        ttnn.copy_host_to_device_tensor(host_scalar(0), t_slot)  # back, to rule out a one-way latch
         replay_expecting(0)
     finally:
         ttnn.release_trace(mesh_device, tid)
