@@ -1,9 +1,6 @@
 name: "[internal] Fabric Multihost Exabox Tests"
 
 on:
-  push:
-    branches:
-      - jj-test-rsync
   workflow_call:
     inputs:
       docker-image:
