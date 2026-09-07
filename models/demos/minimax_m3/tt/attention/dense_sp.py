@@ -63,8 +63,7 @@ def dense_sp_attention(
     """
     if (slot_id is None) != (kv_actual_isl_tensor is None):
         raise ValueError("slot_id and kv_actual_isl_tensor must be passed together")
-    # The op folds the layer into the cache batch on both paths (slot * num_layers + layer_idx, the
-    # update_padded_kv_cache layout); only the slot's form differs: device tensors or host ints.
+    # The op folds the layer into the cache batch on both paths; only the slot's form differs (tensors or host ints).
     slot_kwargs = dict(kv_cache_num_layers=num_layers, kv_cache_layer_idx=layer_idx)
     if slot_id is not None:
         slot_kwargs.update(slot_id=slot_id, kv_actual_isl_tensor=kv_actual_isl_tensor)
@@ -72,8 +71,8 @@ def dense_sp_attention(
         slot_kwargs.update(kv_cache_batch_idx=slot_idx, kv_actual_isl=kv_actual)
 
     if write_chunk:
-        # The write takes the same two scalars the read below consumes (tensors on the trace-safe path, host ints
-        # otherwise), so a re-targeted trace writes and reads one slot; the argument types pick the op overload.
+        # The write takes the same two scalars the read consumes, so a re-targeted trace writes and reads one slot;
+        # the argument types pick the op overload.
         slot_arg, kv_arg = (slot_id, kv_actual_isl_tensor) if slot_id is not None else (slot_idx, kv_actual)
         for cache, chunk in ((cache_k, tt_k_chunk), (cache_v, tt_v_chunk)):
             ttnn.experimental.deepseek_prefill.update_padded_kv_cache(

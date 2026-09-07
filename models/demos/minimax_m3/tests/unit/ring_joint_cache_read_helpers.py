@@ -22,12 +22,10 @@ from models.demos.minimax_m3.utils.general_utils import get_default_num_links
 NQ, NKV, HEAD_DIM = 64, 4, 128
 # Two users x two layers, attention on layer 1: exercises the (user, layer) cache fold beyond slot 0 / layer 0.
 NUM_USERS, NUM_LAYERS, LAYER_IDX = 2, 2, 1
-# SP over mesh rows, TP over mesh cols: chunk tensors shard the sequence (dim 2) over the SP axis and heads (dim 1)
-# over the other; the same pair drives the mapper on the way in and the composer on the way out.
+# SP over mesh rows, TP over mesh cols: the sequence (dim 2) shards over the SP axis, heads (dim 1) over the other.
 SP_AXIS = 0
 SHARD_DIMS = (2, 1) if SP_AXIS == 0 else (1, 2)
-# K/V live in the bf8 cache, so the host-int path is held to this vs the torch golden; the metadata path is then
-# held to torch.equal against the host-int path.
+# The host-int path is held to this vs the torch golden (K/V live in the bf8 cache); the metadata path to torch.equal.
 PCC_BF8_CACHE = 0.99
 
 
@@ -262,9 +260,8 @@ def check_metadata_flow(c):
     t_slot = meta_scalar(0, mesh_device)
     t_kv = meta_scalar(last, mesh_device)
 
-    # Depth 0 first, with the real (one-chunk) logical_n: this creates the metadata program. Depth 1 then has to
-    # be a program-cache HIT that still gathers and attends over the full two-chunk prefix -- the kernels take the
-    # length from kv_actual_isl[0], and nothing on the host may have bounded the program by the depth-0 logical_n.
+    # Depth 0 first with its real logical_n creates the metadata program; depth 1 must then be a cache HIT that still
+    # attends over the full two-chunk prefix, i.e. nothing on the host bounded the program by the depth-0 logical_n.
     tt_q0 = c.make_q(0)
     host0 = c.run_host(0, tt_q0, 0)
     passing, pcc = comp_pcc(c.refs[0][:, :, : c.chunk_global, :], host0, PCC_BF8_CACHE)
@@ -286,10 +283,8 @@ def check_metadata_flow(c):
         mesh_device.num_program_cache_entries() == entries_d0
     ), "depth 1 compiled a new program: logical_n is still part of the hash on the metadata path"
 
-    # A caller may hand over freshly allocated metadata tensors on a later call (e.g. one kv_actual scalar per
-    # depth). That call hits the cached program, whose kernels hold the tensors' DRAM addresses, so the framework
-    # must re-point them. The first tensors stay alive so the new ones cannot land at the same addresses; a stale
-    # address would read slot 0 here and reproduce user 0's output.
+    # Freshly allocated metadata tensors on a cache hit: the kernels hold the tensors' addresses, so the framework
+    # must re-point them. The first tensors stay alive so the new ones land elsewhere; a stale address reads slot 0.
     t_slot_fresh, t_kv_fresh = meta_scalar(1, mesh_device), meta_scalar(last, mesh_device)
     meta1 = c.gather(c.run_meta(t_slot_fresh, t_kv_fresh))
     assert torch.equal(meta1, host[1]), (
@@ -297,10 +292,9 @@ def check_metadata_flow(c):
         f"pcc_vs_user0={comp_pcc(host[0], meta1, 0.0)[1]}"
     )
 
-    # With write_chunk the helper also writes the chunk, and on this path the write must follow the tensors, not
-    # the host slot_idx / kv_actual (left at their defaults 0 here on purpose). Blank user 1's last chunk, then
-    # let the helper rewrite it with the tensors pointing at user 1 / depth 1: a host-slot write would land in
-    # user 0 and a host-offset write in depth 0, and either way the read of user 1 would see zeros.
+    # write_chunk on this path must follow the tensors, not the host slot_idx / kv_actual (both left at 0 on
+    # purpose): blank user 1's last chunk, rewrite it with the tensors at user 1 / depth 1. A host-slot write would
+    # land in user 0 and a host-offset write in depth 0; either way the read of user 1 would see zeros.
     zeros = torch.zeros(NKV, c.cache_global, HEAD_DIM, dtype=torch.bfloat16)
     c.write(c.cache_k, zeros, 1, last)
     c.write(c.cache_v, zeros, 1, last)
@@ -343,9 +337,8 @@ def check_metadata_flow(c):
         replay_expecting(host[1], last, "user 1")
         ttnn.copy_host_to_device_tensor(host_scalar(0), t_slot)  # back, to rule out a one-way latch
         replay_expecting(host[0], last, "user 0 again")
-        # Depth re-target: the Q slab and the kv_actual scalar are both read by address, so refreshing them in
-        # place makes the same captured program attend at depth 0 -- the traced kernels re-derive the length,
-        # the Q mapping and the ring masks from kv_actual_isl[0], and the all-gather clamps its extent from it.
+        # Depth re-target: Q slab and kv_actual scalar are read by address, so refreshed in place the same captured
+        # program attends at depth 0 -- length, Q mapping, ring masks and the gather extent all re-derived on device.
         ttnn.copy_host_to_device_tensor(c.make_q(0, on_device=False), c.tt_q)
         ttnn.copy_host_to_device_tensor(host_scalar(0), t_kv)
         replay_expecting(host0, 0, "user 0 at depth 0")
@@ -366,9 +359,8 @@ def check_metadata_rejections(c, expect_error):
     t_slot, t_kv = meta_scalar(0, mesh_device), meta_scalar(last, mesh_device)
     c.run_meta(t_slot, t_kv)  # warm the metadata program so the tensor-form cases below can be genuine hits
 
-    # The program bakes a DRAM-interleaved single-page accessor for each metadata tensor and the hash never sees
-    # the tensor itself, so a scalar of another form must be refused on a cache hit as well: an L1 scalar (a
-    # different memory config) and a two-element DRAM scalar (same memory config, so a genuine hit).
+    # The accessor is baked for a DRAM single-page tensor and the hash never sees the tensor, so another form must be
+    # refused on a hit too: an L1 scalar (different memory config) and a two-element DRAM scalar (genuine hit).
     def scalar(values, memory_config):
         return ttnn.from_torch(
             torch.tensor(values, dtype=torch.int64).reshape(1, 1, 1, len(values)),
@@ -383,8 +375,8 @@ def check_metadata_rejections(c, expect_error):
         c.run_meta(scalar([1], ttnn.L1_MEMORY_CONFIG), t_kv)
     with expect_error(RuntimeError, "metadata tensor slot_id must hold exactly one element"):
         c.run_meta(scalar([1, 1], ttnn.DRAM_MEMORY_CONFIG), t_kv)
-    # Both tensors or neither. dense_sp refuses the mix before the op sees it; the op's own pairing check exists
-    # but, with cache-shaped K/V, the all-gather output-shape check fires first, so only this rejection is pinned.
+    # Both or neither. dense_sp refuses first; the op's own pairing check is shadowed for cache-shaped K/V by the
+    # all-gather output-shape check, so only this rejection is pinned.
     with expect_error(ValueError, "must be passed together"):
         c.run_meta(t_slot, None)
 
@@ -421,8 +413,7 @@ def check_metadata_rejections(c, expect_error):
             c.tt_q, c.cache_k, c.cache_v, None, None, None, **kwargs
         )
 
-    # KV-pad rotation is implied by metadata on chunked shapes, so its preconditions must be enforced on this
-    # path too; zigzag balancing is one of them. Sliding window is refused outright on this path.
+    # Metadata on chunked shapes implies KV-pad rotation, so its preconditions apply; sliding window is refused.
     with expect_error(RuntimeError, "KV-pad rotation .* does not support balanced"):
         direct_call(is_balanced=True)
     with expect_error(RuntimeError, "sliding window is not supported on the metadata path"):
@@ -432,16 +423,14 @@ def check_metadata_rejections(c, expect_error):
     with expect_error(RuntimeError, "metadata tensors replace the host"):
         direct_call(kv_actual_isl=last)
 
-    # The readers turn slot_id[0] * kv_cache_num_layers + kv_cache_layer_idx into a DRAM offset unchecked, so
-    # the two host factors are bounded here: a layer index past the fold would read the next user's slot.
+    # slot_id[0] * kv_cache_num_layers + kv_cache_layer_idx is a DRAM offset used unchecked; bound the host factors.
     with expect_error(RuntimeError, "kv_cache_layer_idx=.* must be < kv_cache_num_layers"):
         direct_call(kv_cache_layer_idx=NUM_LAYERS)
     with expect_error(RuntimeError, "kv_cache_num_layers must be >= 1"):
         direct_call(kv_cache_num_layers=0)
     with expect_error(RuntimeError, "exceeds the KV cache batch"):
         direct_call(kv_cache_num_layers=NUM_USERS * NUM_LAYERS + 1)
-    # The fold is one formula on both paths, so the host form is bounded the same way, including the folded
-    # index against the cache batch.
+    # One fold formula on both paths, so the host form is bounded the same way, folded index included.
     host_form = dict(slot_id=None, kv_actual_isl_tensor=None, kv_actual_isl=last)
     with expect_error(RuntimeError, "kv_cache_layer_idx=.* must be < kv_cache_num_layers"):
         direct_call(kv_cache_batch_idx=1, kv_cache_layer_idx=NUM_LAYERS, **host_form)
