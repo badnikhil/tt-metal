@@ -159,7 +159,7 @@ The NC build emits per-zone wall-clock cycle counts in the same results DataFram
 | FPU slots | 3 | 3 |
 | TDMA_UNPACK slots | 22 | 22 |
 | TDMA_PACK slots | 14 | 5 |
-| L1 mux positions (Tensix) | 2 | 5 |
+| L1 mux positions (Tensix) | 2 | 6 (the harness captures 0 to 4) |
 | L1 slots in inventory | 32 (16 × 2 mux) | 80 (16 × 5 mux) |
 | Total slots in `BUILTIN_COUNTER_CONFIG` | 130 | 169 |
 | Total config words in L1 | 200 (rest are zero-padded) | 200 |
@@ -247,7 +247,7 @@ Rising-edge triggered. Bit 0 = start (0→1 also clears the counter), bit 1 = st
 
 ### L1 mux (`PERF_CNT_MUX_CTRL`)
 
-The L1 bank has only 8 physical counters, but the hardware exposes 16 (WH) or 40 (BH) client signals. Bits 6:4 of `PERF_CNT_MUX_CTRL` select which group of 8 signals the counters are wired to:
+The L1 bank has only 8 physical counters, but the hardware exposes 16 (WH) or 42 (BH) client signals (Blackhole ports 0 to 41; positions 6 and 7 fall back to position 0). Bits 6:4 of `PERF_CNT_MUX_CTRL` select which group of 8 signals the counters are wired to:
 
 | Mux | WH clients | BH clients |
 |-----|------------|------------|
@@ -255,7 +255,8 @@ The L1 bank has only 8 physical counters, but the hardware exposes 16 (WH) or 40
 | 1 | ext unpackers, NoC Ring 1, TDMA extended | ext unpackers 1-3, NoC Ring 1, TDMA packer 2 |
 | 2 | — | ext unpackers 4-7, NoC Ring 0 secondary channels |
 | 3 | — | NoC Ring 1 secondary channels, ext packers 2-5 |
-| 4 | — | ext packers 6-7, tag search / packer 1 |
+| 4 | — | ext packers 6-7, tag search / packer 1, ext unpackers 8-12 |
+| 5 | — | ext unpackers 13-14 (only slots 0 and 1 are wired; slots 2-7 read 0) |
 
 The mux routes signals at **count time**: whichever group is selected when the counters start is the only one measured during the window, so one run captures one L1 group. The harness pins the group at compile time (`LLK_PERF_L1_MUX_GROUP`, default 0) and the host read fails loudly on a snapshot captured with a different group; capturing another group means another run with another build.
 
