@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <enchantum/enchantum.hpp>
 #include <numeric>
 #include <string>
@@ -337,6 +338,11 @@ public:
     std::vector<std::string> defines(const Params& params) const override {
         auto defines = HalJitBuildQueryBase::defines(params);
         defines.push_back("ARCH_QUASAR");
+        // Build the 4-row FPU variant when TT_METAL_QUASAR_FOUR_ROW is set; default is 8-row.
+        const char* four_row = std::getenv("TT_METAL_QUASAR_FOUR_ROW");
+        if (four_row != nullptr && (std::string(four_row) == "1" || std::string(four_row) == "true")) {
+            defines.push_back("MATH_ROWS=4");
+        }
         return defines;
     }
 
