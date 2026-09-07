@@ -56,12 +56,9 @@ def dense_sp_attention(
     logical_n         total valid prefix length (q attends causally over [0:logical_n])
     write_chunk       when False, skip the cache write and only read (the per-layer seam is the writer)
     slot_id, kv_actual_isl_tensor
-                      trace-safe path: 1-element uint32 device scalars holding the user slot and kv_actual,
-                      read by the kernels at start, so a captured trace re-targets them in place between
-                      replays. Both or neither. The chunk write (write_chunk) and the read both take them;
-                      the host slot_idx / kv_actual are then NOT passed to either op (the op rejects the mix).
-                      logical_n passes through as the real length; on chunked shapes the kernels derive it
-                      on-device as kv_actual_isl[0] + chunk and the op leaves it out of the program hash.
+                      trace-safe path (both or neither): 1-element uint32 device scalars for the user slot and
+                      kv_actual, taken by both the write and the read so a trace re-targets in place; the host
+                      slot_idx / kv_actual are then ignored. Contract: ring_joint_scaled_dot_product_attention.
     -> out            [1, n_q_local, chunk_local, head_dim]    block-cyclic over the chunk
     """
     if (slot_id is None) != (kv_actual_isl_tensor is None):
@@ -75,28 +72,19 @@ def dense_sp_attention(
         slot_kwargs.update(kv_cache_batch_idx=slot_idx, kv_actual_isl=kv_actual)
 
     if write_chunk:
+        # The write takes the same two scalars the read below consumes (tensors on the trace-safe path, host ints
+        # otherwise), so a re-targeted trace writes and reads one slot; the argument types pick the op overload.
+        slot_arg, kv_arg = (slot_id, kv_actual_isl_tensor) if slot_id is not None else (slot_idx, kv_actual)
         for cache, chunk in ((cache_k, tt_k_chunk), (cache_v, tt_v_chunk)):
-            if slot_id is not None:
-                # Same two scalars the read below consumes, so a re-targeted trace writes and reads one slot.
-                ttnn.experimental.deepseek_prefill.update_padded_kv_cache(
-                    cache,
-                    chunk,
-                    slot_id,
-                    kv_actual_isl_tensor,
-                    layer_idx=layer_idx,
-                    num_layers=num_layers,
-                    cluster_axis=cluster_axis,
-                )
-            else:
-                ttnn.experimental.deepseek_prefill.update_padded_kv_cache(
-                    cache,
-                    chunk,
-                    slot_idx=slot_idx,
-                    layer_idx=layer_idx,
-                    num_layers=num_layers,
-                    kv_actual_global=kv_actual,
-                    cluster_axis=cluster_axis,
-                )
+            ttnn.experimental.deepseek_prefill.update_padded_kv_cache(
+                cache,
+                chunk,
+                slot_idx=slot_arg,
+                kv_actual_global=kv_arg,
+                layer_idx=layer_idx,
+                num_layers=num_layers,
+                cluster_axis=cluster_axis,
+            )
 
     out, _, _ = ttnn.transformer.ring_joint_scaled_dot_product_attention(
         tt_q,
