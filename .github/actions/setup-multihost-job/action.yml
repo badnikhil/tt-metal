@@ -86,10 +86,11 @@ runs:
         name: ${{ inputs.wheel-artifact-name }}
         path: ${{ github.workspace }}
 
-    - name: Install rsync on all workers
+    - name: Install rsync 
       shell: bash
       run: |
         set -euo pipefail
+        sudo apt update && sudo apt-get install -y --no-install-recommends rsync
         mpirun --pernode bash -c 'command -v rsync || sudo apt update && sudo apt-get install -y --no-install-recommends rsync'
 
     - name: Create workspace directory on all workers
