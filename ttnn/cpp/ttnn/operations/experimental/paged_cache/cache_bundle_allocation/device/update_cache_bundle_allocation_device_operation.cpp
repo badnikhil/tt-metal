@@ -8,7 +8,7 @@
 #include <tt-metalium/host_api.hpp>
 #include <tt-metalium/tensor_accessor_args.hpp>
 #include "ttnn/device_operation.hpp"
-#include "ttnn/operations/experimental/paged_cache/paged_cache.hpp"
+#include "ttnn/operations/experimental/paged_cache/cache_bundle_allocation/cache_bundle_allocation.hpp"
 
 using namespace tt::tt_metal;
 
@@ -122,7 +122,8 @@ ProgramDescriptor CacheBundleAllocationProgramFactory::create_descriptor(
     }
     KernelDescriptor kernel;
     kernel.kernel_source =
-        "ttnn/cpp/ttnn/operations/experimental/paged_cache/device/kernels/dataflow/update_cache_bundle_allocation.cpp";
+        "ttnn/cpp/ttnn/operations/experimental/paged_cache/cache_bundle_allocation/kernels/"
+        "update_cache_bundle_allocation.cpp";
     kernel.source_type = KernelDescriptor::SourceType::FILE_PATH;
     kernel.core_ranges = cores;
     kernel.compile_time_args = std::move(ct);

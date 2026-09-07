@@ -391,13 +391,7 @@ ttnn/cpp/ttnn/operations/experimental/padded_slice/ @tenstorrent/metalium-develo
 ttnn/cpp/ttnn/operations/experimental/padded_slice/**/CMakeLists.txt @tenstorrent/metalium-developers-convolutions @tenstorrent/metalium-developers-ops-data-movement @tenstorrent/metalium-developers-infra
 ttnn/cpp/ttnn/operations/experimental/paged_cache/ @tenstorrent/metallium-maintainers-llama-models
 ttnn/cpp/ttnn/operations/experimental/paged_cache/**/CMakeLists.txt @tenstorrent/metallium-maintainers-llama-models @tenstorrent/metalium-developers-infra
-# Cache bundle allocation, including its shared API and build registration.
-ttnn/cpp/ttnn/operations/experimental/paged_cache/device/allocation/ @tenstorrent/metalium-developers-sdpa
-ttnn/cpp/ttnn/operations/experimental/paged_cache/device/allocation/**/CMakeLists.txt @tenstorrent/metalium-developers-sdpa @tenstorrent/metalium-developers-infra
-ttnn/cpp/ttnn/operations/experimental/paged_cache/device/kernels/dataflow/update_cache_bundle_allocation.cpp @tenstorrent/metalium-developers-sdpa
-ttnn/cpp/ttnn/operations/experimental/paged_cache/paged_cache.hpp @tenstorrent/metallium-maintainers-llama-models @tenstorrent/metalium-developers-sdpa
-ttnn/cpp/ttnn/operations/experimental/paged_cache/paged_cache_nanobind.cpp @tenstorrent/metallium-maintainers-llama-models @tenstorrent/metalium-developers-sdpa
-ttnn/cpp/ttnn/operations/experimental/paged_cache/sources.cmake @tenstorrent/metallium-maintainers-llama-models @tenstorrent/metalium-developers-sdpa
+ttnn/cpp/ttnn/operations/experimental/paged_cache/cache_bundle_allocation/ @tenstorrent/metalium-developers-sdpa
 ttnn/cpp/ttnn/operations/experimental/quasar/ @tenstorrent/metalium-developers-mmfusedreduce
 ttnn/cpp/ttnn/operations/experimental/quasar/**/CMakeLists.txt @tenstorrent/metalium-developers-mmfusedreduce @tenstorrent/metalium-developers-infra
 ttnn/cpp/ttnn/operations/experimental/reduction/ @tenstorrent/metalium-developers-mmfusedreduce

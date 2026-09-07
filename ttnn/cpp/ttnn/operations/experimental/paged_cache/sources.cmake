@@ -11,7 +11,6 @@ set(TTNN_OP_EXPERIMENTAL_PAGED_CACHE_SRCS
     device/fused_update_cache/paged_row_major_fused_update_cache_program_factory.cpp
     device/fill_cache/paged_fill_cache_device_operation.cpp
     device/fill_cache/paged_fill_cache_program_factory.cpp
-    device/allocation/update_cache_bundle_allocation_device_operation.cpp
     paged_cache.cpp
 )
 
@@ -21,3 +20,5 @@ set(TTNN_OP_EXPERIMENTAL_PAGED_CACHE_SRCS
 # add/remove/rename doesn't touch a file with metalium-developers-infra
 # as a required co-owner.
 set(TTNN_OP_EXPERIMENTAL_PAGED_CACHE_NANOBIND_SRCS paged_cache_nanobind.cpp)
+
+include(cache_bundle_allocation/sources.cmake)

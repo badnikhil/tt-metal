@@ -25,7 +25,7 @@ target_sources(
         FILE_SET kernels
         TYPE HEADERS
         BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
-        FILES ${kernels}
+        FILES ${kernels} ${TTNN_OP_EXPERIMENTAL_PAGED_CACHE_KERNELS}
     PRIVATE
         ${TTNN_OP_EXPERIMENTAL_PAGED_CACHE_SRCS}
 )
