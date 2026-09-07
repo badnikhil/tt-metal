@@ -419,6 +419,14 @@ class TtIndexerBase:
         """Translate a normal layer slot into the compact index-cache slot."""
         return self._index_layer_idx if self._is_index_compact else cache_layer_idx
 
+    @property
+    def index_cache_layers(self) -> int:
+        """Layer stride of the block-cyclic key cache, i.e. the ``num_layers`` the write op is given.
+        Equals ``layer_num`` normally and the compact full-layer count under GLM-5.2 indexer reuse, so a
+        caller validating a cache it owns has to size ``shape[0]`` against this, not against
+        ``layer_num``."""
+        return self._index_cache_layers
+
     def _alloc_indexer_buffers(self, *, need_k_all_gather: bool) -> None:
         """Allocate the stable TP scratch used by both DSA and CSA indexers."""
         if self.tp_factor == 1:
@@ -948,7 +956,20 @@ class TtIndexer(TtIndexerBase):
 
 
 class TtCsaIndexer(TtIndexerBase):
-    """V4 ratio-4 indexer using the same block-cyclic cache and ring scorer as GLM."""
+    """V4 ratio-4 indexer using the same block-cyclic cache and ring scorer as GLM.
+
+    Units. This indexer scores COMPRESSED ENTRIES but is driven in TOKENS, and ``__init__`` converts
+    between them, so the inherited field names do not all mean the same thing. ``TtIndexerBase`` is
+    shared with the GLM ``TtIndexer``, where one entry is one token and the distinction does not exist,
+    so the fields keep their names and the units are recorded here instead:
+
+    - ``__init__(seq_len=)`` and ``__init__(active_seq_len=)``: TOKENS, global.
+    - ``self.seq_len``: ENTRIES -- ``seq_len // compress_rate``. Also readable as ``index_entries``.
+    - ``self.index_topk_capacity``: ENTRIES, since it is capped by ``self.seq_len``.
+    - ``self.max_token_seq_len``: TOKENS -- the ``seq_len`` argument, kept unconverted.
+    - ``self.active_seq_len``: TOKENS, global -- the ``active_seq_len`` argument.
+    - ``self.active_seq_len_local``: TOKENS, per chip -- what ``forward(seq_len=)`` must equal.
+    """
 
     WEIGHT_NAMES = (
         "compressor.indexer.q_b_proj",
@@ -1151,7 +1172,7 @@ class TtCsaIndexer(TtIndexerBase):
             slot_num=slot_num,
             layer_num=layer_num,
         )
-        self.max_token_seq_len = seq_len
+        self.max_token_seq_len = seq_len  # TOKENS; self.seq_len is the same context in ENTRIES
         self.rope_head_dim = int(config.qk_rope_head_dim)
         self._init_block_cyclic_cache_layout(first_layer_idx)
         self._alloc_indexer_buffers(need_k_all_gather=False)
@@ -1171,7 +1192,10 @@ class TtCsaIndexer(TtIndexerBase):
             rms_norm_eps=config.rms_norm_eps,
             sp_axis=sp_axis,
             tp_axis=tp_axis,
-            topology=sp_ccl_topology,
+            # The inner compressor projects on the TP axis and exchanges overlap state on the SP axis, so
+            # it needs both; one value for both is the deadlock resolve_per_axis_topology describes. Pass
+            # the pair only when they differ, since the pair form is positional and asserts sp_axis=0.
+            topology=(sp_ccl_topology, tp_ccl_topology) if sp_ccl_topology != tp_ccl_topology else sp_ccl_topology,
             preloaded_weights={
                 "kv_proj": self._idx_kv_proj,
                 "gate_proj": self._idx_gate_proj,
@@ -1205,11 +1229,21 @@ class TtCsaIndexer(TtIndexerBase):
 
     def reset_overlap_state(self) -> None:
         """Start over from no predecessor window. The inner compressor owns the layout, since it is the
-        one that consumes and emits these."""
+        one that consumes and emits these.
+
+        ``TtCSA.alloc_state`` calls this so this state and the block's own overlap state begin at the
+        same position; ``write_k`` advances it from there, one chunk at a time."""
         if hasattr(self, "_overlap_kv_state"):
             ttnn.deallocate(self._overlap_kv_state)
             ttnn.deallocate(self._overlap_score_state)
         self._overlap_kv_state, self._overlap_score_state = self._compressor.alloc_overlap_state()
+
+    @property
+    def index_entries(self) -> int:
+        """``self.seq_len`` under the name that says its unit: compressed entries, not tokens. Reading
+        it through this alias is what keeps a call site from quietly comparing it against a token
+        count."""
+        return self.seq_len
 
     def _rotate_query(self, q: ttnn.Tensor, start_pos: int) -> ttnn.Tensor:
         batch, heads, rows, head_dim = q.shape
@@ -1309,10 +1343,14 @@ class TtCsaIndexer(TtIndexerBase):
         index_kv_cache: ttnn.Tensor = None,
         seq_len_actual: int | None = None,
     ) -> ttnn.Tensor:
-        """``seq_len`` is the padded LOCAL slab width, fixed for the whole prefill; ``seq_len_actual`` the
-        chunk's real global pre-pad length, which only the overlap state needs (see write_k)."""
+        """``seq_len`` is the padded LOCAL slab width in TOKENS, fixed for the whole prefill;
+        ``seq_len_actual`` the chunk's real global pre-pad length, also in tokens, which only the overlap
+        state needs (see write_k). Neither is an entry count -- see the class docstring on units."""
         assert index_kv_cache is not None, "CSA indexer requires a caller-owned block-cyclic index key cache"
-        assert seq_len == self.active_seq_len_local
+        assert seq_len == self.active_seq_len_local, (
+            f"forward(seq_len=) is the local slab width in TOKENS, not entries: got {seq_len}, expected "
+            f"{self.active_seq_len_local} (which is {self.active_seq_len_local // self.compress_rate} entries)"
+        )
         assert start_pos % self.compress_rate == 0
         cache_layer_idx = self._cache_slot(cache_layer_idx)
         cache_batch_idx = cache_user_id * self._index_cache_layers + cache_layer_idx
