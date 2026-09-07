@@ -72,8 +72,8 @@ struct ReduceDeviceOperation {
     static void validate_on_program_cache_miss(
         const operation_attributes_t& operation_attributes, const tensor_args_t& tensor_args);
 
-    // `scaler` and `post_mul_scaler` are excluded: they reach the kernels as runtime args, so every
-    // value shares one program (#54180). `scaler_mode` carries the structural half.
+    // Excludes `scaler` and `post_mul_scaler`: the kernels read them as runtime args, so every
+    // value shares one program (#54180). `scaler_mode` is hashed in their place.
     static ttsl::hash::hash_t compute_program_hash(
         const operation_attributes_t& operation_attributes, const tensor_args_t& tensor_args);
 

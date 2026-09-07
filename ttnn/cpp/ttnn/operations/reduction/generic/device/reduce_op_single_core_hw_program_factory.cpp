@@ -70,8 +70,7 @@ ReduceDeviceOperation::ReduceSingleCoreHwProgramFactory::create_program_artifact
     tt::DataFormat dst_cb_data_format = tt_metal::datatype_to_dataformat_converter(output.dtype());
     uint32_t dst_single_tile_size = tt::tile_size(dst_cb_data_format);
 
-    // PostMul applies the scalar after the reduction, in the compute kernel; derive_scaler_mode
-    // says which paths need it.
+    // PostMul means the compute kernel applies the scalar after the reduction.
     const bool use_post_mul = operation_attributes.scaler_mode == ScalerMode::PostMul;
 
     // ---- Program-scope resource names (drive the generated dfb:: / tensor:: tokens) ----
@@ -161,8 +160,8 @@ ReduceDeviceOperation::ReduceSingleCoreHwProgramFactory::create_program_artifact
                 },
             },
         .tensor_bindings = {TensorBinding{.tensor_parameter_name = INPUT_TENSOR, .accessor_name = "src"}},
-        // REDUCE_SCALAR applies the tile once per reduced dimension, squaring it. The HW path is
-        // therefore always ScalerMode::PostMul, so the tile only ever carries the identity.
+        // REDUCE_SCALAR applies the tile once per reduced dimension, which would square the
+        // scalar. The HW path is therefore always PostMul, so this tile only carries the identity.
         .compile_time_args =
             {{"scaler_bits", std::bit_cast<uint32_t>(1.0f)}, {"tiles_per_batch", reader_tiles_per_batch}},
         .runtime_arg_schema = {.runtime_arg_names = {"num_tiles", "start_id"}},

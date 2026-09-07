@@ -20,42 +20,66 @@ namespace ttnn::prim {
 
 namespace {
 
-// compute_g2 exists only when the work split leaves a second core group. override_runtime_arguments
-// cannot see the Program, and naming a kernel it lacks is fatal, so it recomputes the decision here;
-// create_program_artifacts asserts the two agree.
+// RM splits NC*H_logical row-wise so each core gets contiguous logical rows; the tile path keeps
+// the NC*Ht slicing.
+uint32_t reduce_w_num_rows(
+    const ReduceParams& attrs, const tt::tt_metal::MeshTensor& a, const tt::tt_metal::MeshTensor& output) {
+    using namespace tt::tt_metal;
+    const auto& shape = a.padded_shape();
+    const uint32_t tile_height = a.tensor_spec().tile().get_height();
+    const uint32_t tile_width = a.tensor_spec().tile().get_width();
+    const uint32_t NC = shape[1] * shape[0];
+    if (!attrs.row_major_w_dense_path) {
+        return NC * tt::div_up(shape[2], tile_height);
+    }
+    const RmPlan plan = make_rm_plan(
+        shape,
+        a.logical_shape(),
+        tile_height,
+        tile_width,
+        datatype_to_dataformat_converter(a.dtype()),
+        datatype_to_dataformat_converter(output.dtype()),
+        attrs.math_op,
+        ReduceOpDim::W);
+    return NC * plan.H_logical;
+}
+
+// The core-group split. create_program_artifacts and the cache-hit override both call this, so
+// they cannot disagree about how many core groups the split leaves. Note the grid-size CoreCoord
+// overload: a grid size is not an inclusive end coordinate, so a CoreRange built from it is wrong.
+auto reduce_w_split_work(
+    const ReduceParams& attrs, const tt::tt_metal::MeshTensor& a, const tt::tt_metal::MeshTensor& output) {
+    const uint32_t num_rows = reduce_w_num_rows(attrs, a, output);
+    const bool split_row_wise = attrs.row_major_w_dense_path;
+    return attrs.sub_core_grids.has_value()
+               ? tt::tt_metal::split_work_to_cores(*attrs.sub_core_grids, num_rows, split_row_wise)
+               : tt::tt_metal::split_work_to_cores(
+                     a.mutable_device().compute_with_storage_grid_size(), num_rows, split_row_wise);
+}
+
+// Whether the compute_g2 kernel exists. override_runtime_arguments cannot see the built Program,
+// and naming a kernel it lacks is fatal, so it asks the shared split instead.
 bool reduce_w_has_second_core_group(
     const ReduceParams& attrs, const tt::tt_metal::MeshTensor& a, const tt::tt_metal::MeshTensor& output) {
     using namespace tt::tt_metal;
-    const bool rm_path = attrs.row_major_w_dense_path;
     const auto& shape = a.padded_shape();
     const uint32_t tile_height = a.tensor_spec().tile().get_height();
     const uint32_t NC = shape[1] * shape[0];
     const uint32_t Ht = tt::div_up(shape[2], tile_height);
-
     const uint32_t shard_Ht = a.shard_spec().has_value() ? a.shard_spec()->shape[0] / tile_height : 0;
+    // Height sharding pins the workers to the shard grid, so there is only ever one group. Mirrors
+    // the use_height_sharding override in create_program_artifacts.
     const bool use_height_sharding =
-        !rm_path && a.memory_config().memory_layout() == TensorMemoryLayout::HEIGHT_SHARDED &&
+        !attrs.row_major_w_dense_path && a.memory_config().memory_layout() == TensorMemoryLayout::HEIGHT_SHARDED &&
         output.memory_config().memory_layout() == TensorMemoryLayout::HEIGHT_SHARDED && a.shard_spec().has_value() &&
         output.shard_spec().has_value() && a.shard_spec()->grid == output.shard_spec()->grid &&
         a.shard_spec()->shape[0] == output.shard_spec()->shape[0] &&
         a.shard_spec()->orientation == output.shard_spec()->orientation &&
         shard_Ht * a.shard_spec()->grid.num_cores() == NC * Ht;
     if (use_height_sharding) {
-        // Workers are pinned to the shard grid, which is a single group.
         return false;
     }
-
-    const uint32_t num_rows = rm_path ? (NC * a.logical_shape()[2]) : (NC * Ht);
-    // Must use the same overload as create_program_artifacts: the grid-size CoreCoord form, not a
-    // CoreRange built from it (a size is not an inclusive end coordinate).
-    CoreRangeSet group_2;
-    if (attrs.sub_core_grids.has_value()) {
-        group_2 = std::get<3>(split_work_to_cores(*attrs.sub_core_grids, num_rows, rm_path));
-    } else {
-        group_2 =
-            std::get<3>(split_work_to_cores(a.mutable_device().compute_with_storage_grid_size(), num_rows, rm_path));
-    }
-    return !group_2.ranges().empty();
+    return !std::get<3>(reduce_w_split_work(attrs, a, output)).ranges().empty();
 }
 
 }  // namespace
@@ -130,23 +154,13 @@ ReduceDeviceOperation::ReduceMultiCoreWProgramFactory::create_program_artifacts(
     }
 
     auto compute_with_storage_grid_size = device->compute_with_storage_grid_size();
-    // RM splits NC*H_logical row-wise so each core gets contiguous logical rows; tile path
-    // keeps the existing NC*Ht slicing.
-    const uint32_t num_rows = rm_path ? (NC * plan.H_logical) : (NC * Ht);
+    const uint32_t num_rows = reduce_w_num_rows(operation_attributes, a, output);
     constexpr bool k_split_rows_row_wise = true;
-    const bool split_row_wise = rm_path;
     uint32_t num_cores;
     CoreRangeSet all_cores, core_group_1, core_group_2;
     uint32_t num_rows_per_core_group_1, num_rows_per_core_group_2;
-    if (operation_attributes.sub_core_grids.has_value()) {
-        std::tie(
-            num_cores, all_cores, core_group_1, core_group_2, num_rows_per_core_group_1, num_rows_per_core_group_2) =
-            tt::tt_metal::split_work_to_cores(*operation_attributes.sub_core_grids, num_rows, split_row_wise);
-    } else {
-        std::tie(
-            num_cores, all_cores, core_group_1, core_group_2, num_rows_per_core_group_1, num_rows_per_core_group_2) =
-            tt::tt_metal::split_work_to_cores(compute_with_storage_grid_size, num_rows, split_row_wise);
-    }
+    std::tie(num_cores, all_cores, core_group_1, core_group_2, num_rows_per_core_group_1, num_rows_per_core_group_2) =
+        reduce_w_split_work(operation_attributes, a, output);
     TT_FATAL(num_cores > 0, "Reduce W requires at least one worker core");
 
     // Height-sharded: pin the worker set to the shard grid and give each core exactly the rows
@@ -183,8 +197,7 @@ ReduceDeviceOperation::ReduceMultiCoreWProgramFactory::create_program_artifacts(
                 : use_height_sharding ? "reduce_multi_core_w_height_sharded"
                                       : "reduce_multi_core_w";
 
-    // PostMul applies the scalar after the reduction, in the compute kernel; derive_scaler_mode
-    // says which paths need it.
+    // PostMul means the compute kernel applies the scalar after the reduction.
     const bool use_post_mul = operation_attributes.scaler_mode == ScalerMode::PostMul;
 
     // Int32 max/min/sum use the SFPU reduce path; fp32 SUM only for the accurate mean opt-in.
@@ -632,10 +645,6 @@ ReduceDeviceOperation::ReduceMultiCoreWProgramFactory::create_program_artifacts(
 
     spec.kernels.push_back(make_compute(COMPUTE_G1, ht_per_core_group_1));
     const bool has_core_group_2 = !core_group_2.ranges().empty();
-    TT_FATAL(
-        has_core_group_2 == reduce_w_has_second_core_group(operation_attributes, a, output),
-        "Reduce W second-core-group predicate disagrees with the work split; the cache-hit override "
-        "would name a compute kernel the program does not have");
     if (has_core_group_2) {
         spec.kernels.push_back(make_compute(COMPUTE_G2, ht_per_core_group_2));
     }

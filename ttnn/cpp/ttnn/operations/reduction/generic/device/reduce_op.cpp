@@ -98,6 +98,10 @@ Tensor reduce(
     bool negate,
     bool fast_and_approximate_mode,
     const std::optional<tt::tt_metal::Layout>& output_layout) {
+    // Scalar ownership: exactly one ttnn::prim::reduce call below applies the user scalar. That call
+    // gets `scaler_mode`; every earlier step of a decomposed reduce gets ScalerMode::None with
+    // scaler == post_mul_scaler == 1.0f.
+    //
     // Only ttnn::sum / ttnn::mean expose output_layout and convert when the device path can't emit it.
     // Checked before the MIN branch, which would drop the request silently.
     TT_FATAL(

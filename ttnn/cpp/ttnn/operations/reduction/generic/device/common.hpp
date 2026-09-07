@@ -77,13 +77,12 @@ inline bool use_sfpu_reduce_path(
            (math_op == ReduceOpMath::SUM || math_op == ReduceOpMath::MAX || math_op == ReduceOpMath::MIN);
 }
 
-// How the scalar reaches the reduction. Structural, so it belongs in the program hash; the value
-// itself does not.
+// Which slot carries the scalar. This is structural, so it is hashed; the value itself is not.
 enum class ScalerMode : uint8_t { None, ScalerTile, PostMul };
 
 // PostMul whenever the scaler CB cannot apply the value exactly: REDUCE_SCALAR (HW) applies the
-// tile once per reduced dimension and squares it, GMPOOL keeps only the exponent for MAX/MIN,
-// and the Int32 / accurate-fp32 SFPU folds bypass the CB.
+// tile once per reduced dimension, squaring it; GMPOOL keeps only the exponent for MAX/MIN; and
+// the Int32 and accurate-fp32 SFPU paths ignore the CB.
 inline ScalerMode derive_scaler_mode(
     tt::tt_metal::ReduceOpMath math_op,
     tt::tt_metal::DataType dtype,

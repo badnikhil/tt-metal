@@ -35,12 +35,16 @@ void ReduceDeviceOperation::validate_on_program_cache_miss(
         "Operands to reduce need to be on device! Got storage type: {}",
         tensor_args.storage_type());
     TT_FATAL(tensor_args.buffer() != nullptr, "Operands to reduce need to be allocated in buffers on device!");
-    // The scalars are excluded from the program hash, so they are what a cache hit cannot vouch for;
-    // with no validate_on_program_cache_hit defined, the framework routes hits here too. The scaler
-    // tile cannot apply the value exactly on the paths derive_scaler_mode() marks PostMul, so a
-    // non-unity scaler must not ride the tile there. One-directional on purpose: PostMul where
-    // ScalerTile would do is always numerically safe, and a two-step stage legitimately sees a
-    // different intermediate dtype than the mode was derived from.
+    // A non-unity scaler must not ride the scaler CB on a path derive_scaler_mode() marks PostMul,
+    // because the CB cannot apply it exactly there.
+    //
+    // This runs on every dispatch, not just the first: `scaler_mode` is hashed, so a cache hit
+    // always sees the mode the miss validated, but `scaler` is not, and the adapter routes hits to
+    // this function when an op defines no validate_on_program_cache_hit.
+    //
+    // Checked one way only. PostMul where ScalerTile would also work is numerically safe, and a
+    // decomposed reduce's later stage sees the intermediate's dtype rather than the one its mode
+    // was derived from, so requiring exact equality here would reject valid calls.
     const bool scaler_cb_is_inexact = derive_scaler_mode(
                                           operation_attributes.math_op,
                                           tensor_args.dtype(),
@@ -222,8 +226,8 @@ void ReduceDeviceOperation::validate_on_program_cache_miss(
 
 ttsl::hash::hash_t ReduceDeviceOperation::compute_program_hash(
     const operation_attributes_t& operation_attributes, const tensor_args_t& tensor_args) {
-    // Tripwire: a new ReduceParams field must be classified — hashed below, or excluded like the
-    // two scalars because the kernels read it as a runtime arg.
+    // Tripwire: adding a ReduceParams field must be a deliberate choice — hash it below, or
+    // exclude it like the two scalars, which the kernels read as runtime args.
     static_assert(
         reflect::size<operation_attributes_t>() == 15,
         "ReduceParams gained or lost a field: add it to compute_program_hash or document why it is "
