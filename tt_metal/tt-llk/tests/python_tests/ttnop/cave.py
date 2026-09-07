@@ -44,6 +44,8 @@ class DetourError(RuntimeError):
 def encode_jal(at: int, target: int) -> int:
     """`jal x0, target` as executed from `at`. rd=x0 so nothing is clobbered."""
     offset = target - at
+    if offset % 2 or not -JAL_REACH <= offset < JAL_REACH:
+        raise DetourError(f"jal from 0x{at:x} cannot reach 0x{target:x}")
     imm = offset & JAL_IMM_MASK
     return (
         (((imm >> JAL_IMM20_SHIFT) & 0x1) << JAL_IMM20_POS)
@@ -62,10 +64,11 @@ class Cave:
 
     def __post_init__(self):
         assert self.start % 4 == 0, "cave must be word aligned"
-        assert self.end <= self.limit, (
-            f"cave needs 0x{self.end - self.start:x} bytes but only "
-            f"0x{self.limit - self.start:x} are reserved. Lower max_delay"
-        )
+        if self.end > self.limit:
+            raise DetourError(
+                f"cave needs 0x{self.end - self.start:x} bytes but only "
+                f"0x{self.limit - self.start:x} are reserved. Lower max_delay"
+            )
 
     @property
     def displaced_instruction(self) -> int:

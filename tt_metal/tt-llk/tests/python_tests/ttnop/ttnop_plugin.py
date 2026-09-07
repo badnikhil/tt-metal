@@ -450,6 +450,12 @@ def pytest_runtest_call(item):
             return
         try:
             findings = perturber.sweep(item)
+        except DetourError as err:
+            # The clean test passed, but this ELF cannot hold the requested
+            # detour. That is missing injector coverage, not a kernel failure.
+            _hb().mark_done(item.nodeid)
+            outcome.force_exception(pytest.skip.Exception(f"ttnop skipped: {err}"))
+            return
         except sweep_module.DeviceWedged as err:
             # Record the hang and let the supervisor clear the core.
             _hang_closes_case(item.nodeid, str(err))
@@ -483,9 +489,19 @@ def pytest_runtest_logreport(report):
         or (report.when == "setup" and report.outcome == "skipped")
     ):
         return
+    # Setup-time skips/failures never enter pytest_runtest_call, so close them
+    # here. Otherwise every such result is present in JUnit but the supervisor
+    # incorrectly calls the completed sweep unfinished.
+    if report.when == "setup":
+        _hb().mark_done(report.nodeid)
+    result_outcome = (
+        "xfailed"
+        if report.outcome == "skipped" and getattr(report, "wasxfail", None)
+        else report.outcome
+    )
     _hb().record_result(
         report.nodeid,
-        report.outcome,
+        result_outcome,
         getattr(report, "duration", 0.0),
         str(report.longrepr or ""),
     )

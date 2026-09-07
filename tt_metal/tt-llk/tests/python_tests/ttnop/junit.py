@@ -85,8 +85,11 @@ def _result_case(nodeid: str, record: dict) -> tuple:
             element, "failure", type="AssertionError", message=_summary(message)
         )
         failure.text = _clean(message)
-    elif outcome == "skipped":
-        ElementTree.SubElement(element, "skipped", message=_summary(message))
+    elif outcome in ("skipped", "xfailed"):
+        attributes = {"message": _summary(message)}
+        if outcome == "xfailed":
+            attributes["type"] = "pytest.xfail"
+        ElementTree.SubElement(element, "skipped", **attributes)
     return element, outcome
 
 
@@ -115,7 +118,7 @@ def render(results: dict, wedges: list, path: Path) -> Path:
         total_time += float(record.get("duration") or 0.0)
         if outcome == "failed":
             failed += 1
-        elif outcome == "skipped":
+        elif outcome in ("skipped", "xfailed"):
             skipped += 1
 
     suite = ElementTree.Element(

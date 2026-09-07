@@ -81,7 +81,7 @@ FILTER_ARGS=()
 XDIST_ARGS=()
 [[ "$DEVICE_JOBS" -gt 1 ]] && XDIST_ARGS=(-n "$DEVICE_JOBS")
 # Progress comes from supervise.py. These keep pytest from flooding the log.
-QUIET_ARGS=(-p no:sugar -o console_output_style=classic -o log_cli=false)
+QUIET_ARGS=(-p no:sugar -o console_output_style=classic -o log_cli=false --show-capture=no --tb=short)
 
 echo ">> delays=${TTNOP_DELAYS:-1-100} threads=${TTNOP_THREADS:-unpack,math}" \
      "sites=${TTNOP_SITE_MODE:-sync} filler=${TTNOP_FILLER:-auto}"
