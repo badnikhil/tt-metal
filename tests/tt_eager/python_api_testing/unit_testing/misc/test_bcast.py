@@ -289,3 +289,54 @@ def test_bcast_h_block_sharded_batched_channel(device, batch, height_per_batch, 
     passing, pcc_msg = check_with_pcc_without_tensor_printout(torch_ref_output.float(), output_tensor, 0.999)
     logger.info(pcc_msg)
     assert passing, pcc_msg
+
+
+@pytest.mark.parametrize(
+    "a_shape, out_shape",
+    (
+        # oversized: the work split is input_a's tile count, so most of the caller's buffer is left stale
+        ([1, 1, 32, 32], [1, 1, 64, 64]),
+        # undersized: the writer emits input_a's tile count into a smaller buffer and runs off the end
+        ([1, 1, 64, 64], [1, 1, 32, 32]),
+        # same volume, different shape
+        ([1, 1, 32, 64], [1, 1, 64, 32]),
+        # page count that is not a multiple of the input's
+        ([1, 1, 32, 32], [1, 1, 32, 96]),
+        # dropped batch
+        ([1, 2, 32, 32], [1, 1, 32, 32]),
+    ),
+)
+@pytest.mark.parametrize("math_op", [ttnn.BcastOpMath.ADD, ttnn.BcastOpMath.MUL])
+def test_bcast_preallocated_output_shape_mismatch(device, a_shape, out_shape, math_op):
+    """A preallocated output_tensor whose shape is not the shape bcast produces must be rejected.
+
+    The guard used to compare against compute_output_specs(), which early-returns the preallocated
+    tensor's own spec, so it compared the shape with itself and never fired.
+    """
+    a = ttnn.from_torch(torch.rand(a_shape, dtype=torch.bfloat16), device=device, layout=ttnn.TILE_LAYOUT)
+    b = ttnn.from_torch(torch.rand([1, 1, 32, 32], dtype=torch.bfloat16), device=device, layout=ttnn.TILE_LAYOUT)
+    out = ttnn.from_torch(torch.rand(out_shape, dtype=torch.bfloat16), device=device, layout=ttnn.TILE_LAYOUT)
+
+    with pytest.raises(RuntimeError, match="preallocated output tensor needs a shape of"):
+        ttnn.bcast(a, b, math_op, ttnn.BcastOpDim.HW, output_tensor=out)
+
+
+@pytest.mark.parametrize("math_op", [ttnn.BcastOpMath.ADD, ttnn.BcastOpMath.MUL])
+def test_bcast_preallocated_output_shape_match(device, math_op):
+    """The matching case must still run and write the caller's buffer in place."""
+    a_torch = torch.rand([1, 1, 64, 64], dtype=torch.bfloat16)
+    b_torch = torch.rand([1, 1, 32, 32], dtype=torch.bfloat16)
+    a = ttnn.from_torch(a_torch, device=device, layout=ttnn.TILE_LAYOUT)
+    b = ttnn.from_torch(b_torch, device=device, layout=ttnn.TILE_LAYOUT)
+    out = ttnn.from_torch(
+        torch.full([1, 1, 64, 64], -99.0, dtype=torch.bfloat16), device=device, layout=ttnn.TILE_LAYOUT
+    )
+    out_addr = out.buffer_address()
+
+    result = ttnn.bcast(a, b, math_op, ttnn.BcastOpDim.HW, output_tensor=out)
+
+    assert result.buffer_address() == out_addr
+    scalar = b_torch[0, 0, 0, 0].float()
+    expected = a_torch.float() + scalar if math_op == ttnn.BcastOpMath.ADD else a_torch.float() * scalar
+    passing, pcc_msg = check_with_pcc_without_tensor_printout(expected, ttnn.to_torch(out).float(), 0.999)
+    assert passing, pcc_msg

@@ -79,12 +79,16 @@ void BcastDeviceOperation::validate_on_program_cache_miss(
     TT_FATAL(is_floating_point(input_tensor_a.dtype()), "Unsupported data format");
     if (tensor_args.preallocated_output.has_value()) {
         TT_FATAL(is_floating_point(tensor_args.preallocated_output->dtype()), "Unsupported data format");
-        const auto output_spec_required = compute_output_specs(operation_attributes, tensor_args);
+        // Not `compute_output_specs(...)`: that early-returns the preallocated tensor's own spec when
+        // one is given, so comparing against it here would compare the shape with itself and could
+        // never fire. bcast is elementwise in `input_a`, so the shape the op produces is `input_a`'s.
+        // The padded shape is what sizes the output buffer, and the work split is `input_a`'s tile
+        // count, so a mismatch here is what makes the writer run off the end of the output buffer.
         const auto& out_tensor = tensor_args.preallocated_output.value();
         TT_FATAL(
-            out_tensor.logical_shape() == output_spec_required.logical_shape(),
-            "The input tensors need a shape of {}, however the output tensor is only {}",
-            output_spec_required.logical_shape(),
+            out_tensor.padded_shape() == input_tensor_a.padded_shape(),
+            "The preallocated output tensor needs a shape of {}, however the output tensor is {}",
+            input_tensor_a.padded_shape(),
             out_tensor.padded_shape());
     }
     if (operation_attributes.in_place) {
