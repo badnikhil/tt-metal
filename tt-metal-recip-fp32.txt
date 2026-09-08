@@ -1,0 +1,61 @@
+$ # ttnn.reciprocal (float32, Blackhole): the Newton correction underflows and is discarded
+$ #   ttsim Blackhole v1.10.6, TT_METAL_DISABLE_SFPLOADMACRO=1, 256 bf16-spaced mantissas
+$ #   per binade, golden 1/x evaluated in float64
+
+$ git checkout origin/main && python check_recipfix.py               # BEFORE
+    binade  wrong>4ULP    maxULP   max rel err          binade  wrong>4ULP    maxULP   max rel err
+     2^110       0/256         1    1.1874e-07           2^118     210/256     51067    3.6621e-03
+     2^111       2/256       396    3.0519e-05           2^119     256/256     90174    5.5847e-03
+     2^114      16/256      3219    2.4409e-04           2^122     256/256     90174    5.5847e-03
+     2^117     136/256     29700    1.9226e-03           2^125     256/256     90174    5.5847e-03
+                 x                got               want        ULP         rel
+    6.64613998e+35    1.498755297e-36    1.504632769e-36      65536   3.906e-03      # 2^119
+    4.25352959e+37    2.341805152e-38    2.350988702e-38      65536   3.906e-03      # 2^125
+    7.97536797e+36    1.248962748e-37    1.253860678e-37      43691   3.906e-03      # 1.5*2^122
+all 65,536 bf16 patterns as float32:  max ULP 1  ->  mean ULP 0.00781 below 2^111,
+                                      16318.86510 over 2^111..2^126  (2,162 of 3,840 wrong)
+consumers at x = 1.5*2^122, exact 1/x = 1.253860641e-37:
+        ttnn.reciprocal(x)      1.248962748e-37    3.906e-03      <- the bug
+            ttnn.div(1, x)      1.253860678e-37    2.980e-08      <- same seed, multiplicative Newton
+           ttnn.rdiv(x, 1)      1.253860678e-37    2.980e-08
+           ttnn.pow(x, -1)      1.253860678e-37    2.980e-08
+   ttnn.div_bw(1, a, x)[0]      1.248962748e-37    3.906e-03      <- inherits it
+      ttnn.log_bw(1, x)[0]      1.248962748e-37    3.906e-03      <- inherits it
+reciprocal vs rdiv over all 65,536 patterns: bit-identical on 42934/65536
+
+$ git checkout fix/ttnn-reciprocal--float32--Blackhole- && python check_recipfix.py            # AFTER
+    binade  wrong>4ULP    maxULP   max rel err          binade  wrong>4ULP    maxULP   max rel err
+     2^110       0/256         1    1.1874e-07           2^118       0/256         1    1.1874e-07
+     2^111       0/256         1    1.1874e-07           2^119       0/256         1    1.1874e-07
+     2^114       0/256         1    1.1874e-07           2^122       0/256         1    1.1874e-07
+     2^117       0/256         1    1.1874e-07           2^125       0/256         1    1.1874e-07
+                 x                got               want        ULP         rel
+    6.64613998e+35    1.504632769e-36    1.504632769e-36          0   0.000e+00      # 2^119
+    4.25352959e+37    2.350988702e-38    2.350988702e-38          0   0.000e+00      # 2^125
+    7.97536797e+36    1.253860678e-37    1.253860678e-37          0   0.000e+00      # 1.5*2^122
+all 65,536 bf16 patterns as float32:  max ULP 1  ->  mean ULP 0.33593 below 2^111,
+                                      0.33594 over 2^111..2^126  (0 of 3,840 wrong)
+consumers at x = 1.5*2^122, exact 1/x = 1.253860641e-37:
+        ttnn.reciprocal(x)      1.253860678e-37    2.980e-08
+            ttnn.div(1, x)      1.253860678e-37    2.980e-08
+           ttnn.rdiv(x, 1)      1.253860678e-37    2.980e-08
+           ttnn.pow(x, -1)      1.253860678e-37    2.980e-08
+   ttnn.div_bw(1, a, x)[0]      1.253860678e-37    2.980e-08
+      ttnn.log_bw(1, x)[0]      1.253860678e-37    2.980e-08
+reciprocal vs rdiv over all 65,536 patterns: bit-identical on 65536/65536
+
+$ # signs and poles are unchanged (test_reciprocal_fp32_special_values, passes both ways)
+1/+0 = +inf   1/-0 = -inf   1/+inf = +0   1/-inf = -0   1/1 = 1   1/2 = 0.5   1/0.5 = 2
+$ # bfloat16 is a control: it uses _calculate_reciprocal_fast_8b_3c_, max ULP 0 before and after
+
+$ pytest tests/ttnn/unit_tests/operations/eltwise/test_unary_fp32.py -k reciprocal   # on main
+FAILED test_reciprocal_fp32_large_magnitude[exponent=111]  Max ULP Delta: 396.0
+FAILED test_reciprocal_fp32_large_magnitude[exponent=114]  Max ULP Delta: 3219.0
+FAILED test_reciprocal_fp32_large_magnitude[exponent=118]  Max ULP Delta: 51067.0
+FAILED test_reciprocal_fp32_large_magnitude[exponent=119]  Max ULP Delta: 90174.0
+FAILED test_reciprocal_fp32_large_magnitude[exponent=122]  Max ULP Delta: 90174.0
+FAILED test_reciprocal_fp32_large_magnitude[exponent=125]  Max ULP Delta: 90174.0
+================== 6 failed, 2 passed, 23 deselected in 1.75s ==================
+
+$ pytest tests/ttnn/unit_tests/operations/eltwise/test_unary_fp32.py                 # with the fix
+============================= 31 passed in 28.79s ==============================
