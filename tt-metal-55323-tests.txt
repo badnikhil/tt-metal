@@ -1,0 +1,67 @@
+$ # tt-metal #55323 / PR #55675 -- ttsim Blackhole (libttsim_bh.so v1.10.6), TT_METAL_SLOW_DISPATCH_MODE=1
+$ # before = upstream main ce94a27c, after = fix/int32-div-by-zero cc89b4c3
+$ nice -n 19 ionice -c3 python repro_55323.py   # ttnn.div(a, b, rounding_mode=...) on INT32 tensors
+== rounding_mode=floor  out dtype=torch.int32        before  ->  after
+  div(           0,   0) ->        65536  ->             0   <-- fixed
+  div(           1,   0) ->        65536  ->    2147483647   <-- fixed
+  div(           5,   0) ->        65536  ->    2147483647   <-- fixed
+  div(         100,   0) ->        65536  ->    2147483647   <-- fixed
+  div(      123456,   0) ->        65536  ->    2147483647   <-- fixed
+  div(  2147483647,   0) ->        65536  ->    2147483647   <-- fixed
+  div(          -1,   0) ->       -65537  ->   -2147483648   <-- fixed
+  div(          -5,   0) ->       -65537  ->   -2147483648   <-- fixed
+  div(        -100,   0) ->       -65537  ->   -2147483648   <-- fixed
+  div( -2147483648,   0) ->        65534  ->   -2147483648   <-- fixed
+  div(           7,   0) ->        65536  ->    2147483647   <-- fixed
+  div(          -7,   0) ->       -65537  ->   -2147483648   <-- fixed
+  div(    16777216,   0) ->        65536  ->    2147483647   <-- fixed
+  div(   -16777216,   0) ->       -65537  ->   -2147483648   <-- fixed
+  div(           7,   2) ->            3  ->             3
+  div(          -7,   2) ->           -4  ->            -4
+  div(           7,  -2) ->           -4  ->            -4
+  div(          -7,  -2) ->            3  ->             3
+  div( -2147483648,   1) ->  -2147483648  ->   -2147483648
+  div(  2147483647,  -1) ->  -2147483647  ->   -2147483647
+  div(           0,   5) ->            0  ->             0
+  div(           6,   3) ->            2  ->             2
+== rounding_mode=trunc  out dtype=torch.int32        before  ->  after
+  div(           0,   0) ->        65536  ->             0   <-- fixed
+  div(           1,   0) ->        65536  ->    2147483647   <-- fixed
+  div(           5,   0) ->        65536  ->    2147483647   <-- fixed
+  div(         100,   0) ->        65536  ->    2147483647   <-- fixed
+  div(      123456,   0) ->        65536  ->    2147483647   <-- fixed
+  div(  2147483647,   0) ->        65536  ->    2147483647   <-- fixed
+  div(          -1,   0) ->       -65536  ->   -2147483648   <-- fixed
+  div(          -5,   0) ->       -65536  ->   -2147483648   <-- fixed
+  div(        -100,   0) ->       -65536  ->   -2147483648   <-- fixed
+  div( -2147483648,   0) ->        65535  ->   -2147483648   <-- fixed
+  div(           7,   0) ->        65536  ->    2147483647   <-- fixed
+  div(          -7,   0) ->       -65536  ->   -2147483648   <-- fixed
+  div(    16777216,   0) ->        65536  ->    2147483647   <-- fixed
+  div(   -16777216,   0) ->       -65536  ->   -2147483648   <-- fixed
+  div(           7,   2) ->            3  ->             3
+  div(          -7,   2) ->           -3  ->            -3
+  div(           7,  -2) ->           -3  ->            -3
+  div(          -7,  -2) ->            3  ->             3
+  div( -2147483648,   1) ->  -2147483648  ->   -2147483648
+  div(  2147483647,  -1) ->  -2147483647  ->   -2147483647
+  div(           0,   5) ->            0  ->             0
+  div(           6,   3) ->            2  ->             2
+== scalar divisor ttnn.div(t, 0, rounding_mode=floor)
+  before: [65536, 65536, 65536, 65536, 65536, 65536, -65537, -65537, -65537, 65534, 65536, -65537, 65536, -65537]
+  after:  [0, 2147483647, 2147483647, 2147483647, 2147483647, 2147483647, -2147483648, -2147483648, -2147483648, -2147483648, 2147483647, -2147483648, 2147483647, -2147483648]
+== scalar divisor ttnn.div(t, 0, rounding_mode=trunc)
+  before: [65536, 65536, 65536, 65536, 65536, 65536, -65536, -65536, -65536, 65535, 65536, -65536, 65536, -65536]
+  after:  [0, 2147483647, 2147483647, 2147483647, 2147483647, 2147483647, -2147483648, -2147483648, -2147483648, -2147483648, 2147483647, -2147483648, 2147483647, -2147483648]
+
+$ nice -n 19 ionice -c3 python -m pytest tests/ttnn/unit_tests/operations/eltwise/test_binary_int32.py \
+      -k "test_div_int32_by_zero or zero_divisor_lanes" -p no:cacheprovider -v
+platform linux -- Python 3.12.3, pytest-9.0.3, pluggy-1.6.0 -- /home/nikhil/Desktop/bounty/tt-metal/python_env/bin/python
+collected 775 items / 769 deselected / 6 selected
+PASSED tests/ttnn/unit_tests/operations/eltwise/test_binary_int32.py::test_div_int32_by_zero[scalar_divisor=False-rounding_mode=trunc]
+PASSED tests/ttnn/unit_tests/operations/eltwise/test_binary_int32.py::test_div_int32_by_zero[scalar_divisor=False-rounding_mode=floor]
+PASSED tests/ttnn/unit_tests/operations/eltwise/test_binary_int32.py::test_div_int32_by_zero[scalar_divisor=True-rounding_mode=trunc]
+PASSED tests/ttnn/unit_tests/operations/eltwise/test_binary_int32.py::test_div_int32_by_zero[scalar_divisor=True-rounding_mode=floor]
+PASSED tests/ttnn/unit_tests/operations/eltwise/test_binary_int32.py::test_div_int32_zero_divisor_lanes_do_not_disturb_neighbours[rounding_mode=trunc]
+PASSED tests/ttnn/unit_tests/operations/eltwise/test_binary_int32.py::test_div_int32_zero_divisor_lanes_do_not_disturb_neighbours[rounding_mode=floor]
+====================== 6 passed, 769 deselected in 0.45s =======================
