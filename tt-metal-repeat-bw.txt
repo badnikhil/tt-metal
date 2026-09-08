@@ -1,0 +1,54 @@
+tt-metal  ttnn.repeat_bw   TT_FATAL on non-tile-multiple shapes; empty gradient list for a dim 2/3 repeat;
+                          whole-axis sum (wrong shape) when the repeated dim's extent is > 1
+main @ 8e18a76b  vs  fix/ttnn-repeat-bw @ 71aae143    ttsim Blackhole (libttsim_bh.so v1.10.6), bfloat16, TILE_LAYOUT
+golden = torch autograd over input.repeat(sizes), in float64   (TT_METAL_SLOW_DISPATCH_MODE=1, TT_METAL_DISABLE_SFPLOADMACRO=1)
+
+$ git checkout origin/main && ninja _ttnn.so && python measure_repeatbw.py               # BEFORE
+           input          sizes |                 status            shape  maxULP    maxrel
+  (1, 1, 32, 32)   [2, 1, 1, 1] |                     ok   (1, 1, 32, 32)       1  1.75e-03   worst got= 1.00781     want= 1.00391
+  (1, 1, 32, 64)   [2, 1, 1, 1] |                     ok   (1, 1, 32, 64)       1  2.54e-03   worst got=-1.36719     want=-1.36328
+  (1, 1, 17, 32)   [2, 1, 1, 1] | TT_FATAL  input_dim_wo_padding[1] = 17  !=  output_dim_wo_padding
+  (1, 1, 32, 17)   [2, 1, 1, 1] | TT_FATAL  input_dim_wo_padding[0] = 17  !=  output_dim_wo_padding
+  (1, 1, 33, 32)   [2, 1, 1, 1] | TT_FATAL  input_dim_wo_padding[1] = 33  !=  output_dim_wo_padding
+  (1, 1, 32, 33)   [2, 1, 1, 1] | TT_FATAL  input_dim_wo_padding[0] = 33  !=  output_dim_wo_padding
+  (1, 1, 17, 37)   [2, 1, 1, 1] | TT_FATAL  input_dim_wo_padding[0] = 37  !=  output_dim_wo_padding
+    (1, 1, 7, 7)   [4, 1, 1, 1] | TT_FATAL  input_dim_wo_padding[0] = 7  !=  output_dim_wo_padding
+  (1, 1, 33, 65)   [4, 1, 1, 1] | TT_FATAL  input_dim_wo_padding[0] = 65  !=  output_dim_wo_padding
+  (1, 1, 17, 37)   [1, 3, 1, 1] | TT_FATAL  input_dim_wo_padding[0] = 37  !=  output_dim_wo_padding
+    (1, 1, 7, 7)  [1, 24, 1, 1] | TT_FATAL  input_dim_wo_padding[0] = 7  !=  output_dim_wo_padding
+  (1, 1, 32, 32)   [1, 1, 2, 1] |    EMPTY gradient list
+  (1, 1, 32, 32)   [1, 1, 1, 2] |    EMPTY gradient list
+  (1, 1, 17, 37)   [1, 1, 3, 1] |    EMPTY gradient list
+  (1, 1, 17, 37)   [1, 1, 1, 3] |    EMPTY gradient list
+    (1, 1, 7, 7)   [1, 1, 1, 1] |    EMPTY gradient list
+  (1, 1, 17, 37)   [1, 1, 2, 3] |    EMPTY gradient list
+(1, 1, 320, 384)   [1, 1, 1, 2] |    EMPTY gradient list
+  (1, 3, 32, 32)   [1, 2, 1, 1] |            WRONG SHAPE   (1, 1, 32, 32)
+  (1, 2, 17, 37)   [1, 3, 1, 1] | TT_FATAL  input_dim_wo_padding[0] = 37  !=  output_dim_wo_padding
+
+$ git checkout fix/ttnn-repeat-bw && ninja _ttnn.so && python measure_repeatbw.py        # AFTER
+           input          sizes |                 status            shape  maxULP    maxrel
+  (1, 1, 32, 32)   [2, 1, 1, 1] |                     ok   (1, 1, 32, 32)       1  1.75e-03   worst got= 1.00781     want= 1.00391
+  (1, 1, 32, 64)   [2, 1, 1, 1] |                     ok   (1, 1, 32, 64)       1  2.54e-03   worst got=-1.36719     want=-1.36328
+  (1, 1, 17, 32)   [2, 1, 1, 1] |                     ok   (1, 1, 17, 32)       1  1.68e-03   worst got= 0.707031    want= 0.705078
+  (1, 1, 32, 17)   [2, 1, 1, 1] |                     ok   (1, 1, 32, 17)       1  1.68e-03   worst got= 0.707031    want= 0.705078
+  (1, 1, 33, 32)   [2, 1, 1, 1] |                     ok   (1, 1, 33, 32)       1  2.92e-03   worst got=-1.39844     want=-1.39429
+  (1, 1, 32, 33)   [2, 1, 1, 1] |                     ok   (1, 1, 32, 33)       1  2.92e-03   worst got=-1.39844     want=-1.39429
+  (1, 1, 17, 37)   [2, 1, 1, 1] |                     ok   (1, 1, 17, 37)       1  1.32e-03   worst got= 2.79688     want= 2.78906
+    (1, 1, 7, 7)   [4, 1, 1, 1] |                     ok     (1, 1, 7, 7)      16  2.83e-03   worst got= 0.046875    want= 0.0507812
+  (1, 1, 33, 65)   [4, 1, 1, 1] |                     ok   (1, 1, 33, 65)   15360  5.69e-03   worst got=-0.0078125   want= 0
+  (1, 1, 17, 37)   [1, 3, 1, 1] |                     ok   (1, 1, 17, 37)      64  3.36e-03   worst got= 0.00390625  want= 0.00292969
+    (1, 1, 7, 7)  [1, 24, 1, 1] |                     ok     (1, 1, 7, 7)      27  1.52e-02   worst got=-0.28125     want=-0.239258
+  (1, 1, 32, 32)   [1, 1, 2, 1] |                     ok   (1, 1, 32, 32)       1  1.75e-03   worst got= 1.00781     want= 1.00391
+  (1, 1, 32, 32)   [1, 1, 1, 2] |                     ok   (1, 1, 32, 32)       1  3.60e-03   worst got=-0.652344    want=-0.650391
+  (1, 1, 17, 37)   [1, 1, 3, 1] |                     ok   (1, 1, 17, 37)      64  3.36e-03   worst got= 0.00390625  want= 0.00292969
+  (1, 1, 17, 37)   [1, 1, 1, 3] |                     ok   (1, 1, 17, 37)   15040  4.43e-03   worst got= 0           want=-0.00146484
+    (1, 1, 7, 7)   [1, 1, 1, 1] |                     ok     (1, 1, 7, 7)       0  0.00e+00   worst got=-1.59375     want=-1.59375
+  (1, 1, 17, 37)   [1, 1, 2, 3] |                     ok   (1, 1, 17, 37)   14848  6.08e-03   worst got= 0           want= 0.000488281
+(1, 1, 320, 384)   [1, 1, 1, 2] |                     ok (1, 1, 320, 384)       1  2.57e-03   worst got= 2.82812     want= 2.82031
+  (1, 3, 32, 32)   [1, 2, 1, 1] |                     ok   (1, 3, 32, 32)       1  3.06e-03   worst got=-1.11719     want=-1.11328
+  (1, 2, 17, 37)   [1, 3, 1, 1] |                     ok   (1, 2, 17, 37)   15104  4.17e-03   worst got= 0           want= 0.00195312
+
+$ pytest tests/ttnn/nightly/unit_tests/operations/eltwise/backward/test_backward_repeat.py
+BEFORE  ======================== 22 failed, 11 passed in 3.92s =========================   (6 TT_FATAL, 15 empty lists, 1 wrong shape)
+AFTER   ==============================  33 passed in 3.80s  ==============================   (25 new cases + the 8 pre-existing)
