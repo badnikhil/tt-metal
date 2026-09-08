@@ -1,0 +1,45 @@
+$ # ttnn.softplus (float32): the deep negative tail returns +-inf / NaN / up to 3.28e38
+$ #   ttsim Blackhole v1.10.6, all 65,536 bfloat16 bit patterns promoted to float32,
+$ #   threshold=20; "nonzero/zero" counts inputs whose exact softplus underflows to 0
+
+$ git checkout origin/main && python check_softplus.py               # BEFORE
+  beta  nonzero/zero  zero/normal   inf  nan    max|got|      band lo      band hi
+     1           128            0    44    0   4.566e+37 -1.74326e+07 -8.78182e+06
+   0.5           128            2    44    0   9.132e+37 -3.48652e+07 -1.75636e+07
+     2           128            0    44    0   2.283e+37 -8.71629e+06 -4.39091e+06
+    10           126            0    46    0   6.928e+34  -1.7367e+06      -872448
+   100           125            0    44    0    4.56e+33      -174080       -87552
+  x in -[2^22, 2^23): nonzero=    0/8192  inf=    0 nan=   0 max|got|=0
+  x in -[2^23, 2^24): nonzero= 7856/8192  inf= 2625 nan=  62 max|got|=3.28092e+38
+  x in -[2^24, 2^25): nonzero=  326/8192  inf=  109 nan=   2 max|got|=6.11954e+37
+  x in -[2^25, 2^26): nonzero=    0/8192  inf=    0 nan=   0 max|got|=0
+  softplus(-8.78182e+06) = 0.715743     softplus(-1e+07) = inf
+  softplus(      -9e+06) = 1.67788e-10  softplus(-1.6e+07) = inf
+
+$ git checkout fix/ttnn-softplus-fp32-tail && python check_softplus.py   # AFTER
+  beta  nonzero/zero  zero/normal   inf  nan    max|got|      band lo      band hi
+     1             0            0     0    0           -            -            -
+   0.5             0            2     0    0           -            -            -
+     2             0            0     0    0           -            -            -
+    10             0            0     0    0           -            -            -
+   100             0            0     0    0           -            -            -
+  x in -[2^22, 2^23): nonzero=    0/8192  inf=    0 nan=   0 max|got|=0
+  x in -[2^23, 2^24): nonzero=    0/8192  inf=    0 nan=   0 max|got|=0
+  x in -[2^24, 2^25): nonzero=    0/8192  inf=    0 nan=   0 max|got|=0
+  x in -[2^25, 2^26): nonzero=    0/8192  inf=    0 nan=   0 max|got|=0
+  softplus(-8.78182e+06) = 0            softplus(-1e+07) = 0
+  softplus(      -9e+06) = 0            softplus(-1.6e+07) = 0
+
+$ # nothing outside the band moves: max ULP restricted to |beta*x| <= 4e6
+$ #   beta=1   n=38122 maxULP=7315 mean=579.06967    (identical before and after)
+$ #   beta=100 n=36410 maxULP=3698 mean=731.44636    (identical before and after)
+
+$ pytest test_activation.py -k softplus_fp32_deep        # on origin/main
+FAILED ...[beta=0.5] - AssertionError: softplus produced non-finite output for finite input
+FAILED ...[beta=1]   FAILED ...[beta=2]   FAILED ...[beta=10]   FAILED ...[beta=100]
+
+$ pytest test_activation.py -k softplus_fp32_deep        # with the fix
+====================== 5 passed, 109 deselected in 8.80s =======================
+
+$ pytest tests/ttnn/unit_tests/operations/eltwise/test_activation.py
+================== 111 passed, 3 skipped in 170.64s (0:02:50) ==================
