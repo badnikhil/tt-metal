@@ -1,0 +1,47 @@
+$ # Every ttnn unary op accepts a preallocated output_tensor= of the wrong shape: the TT_FATAL
+$ #   takes the "computed" shape from compute_output_specs(), which returns the preallocated
+$ #   tensor's own spec, so it compares the shape against itself and can never fire.
+$ #   ttsim Blackhole v1.10.6, bfloat16, TILE. input = 2.0, output_tensor prefilled with -99.0.
+
+$ git checkout origin/main && python probe_outshape2.py                       # BEFORE
+A ttnn.exp  out 4x too big         in (1, 1, 32, 32) (1p) out (1, 1, 64, 64) (4p) -> NO ERROR, returned (1,1,64,64), buffer is out
+                                     out holds 1024/4096 correct, 0/4096 untouched, distinct values [1.0, 7.40625]
+B ttnn.exp  out 4x too small       in (1, 1, 64, 64) (4p) out (1, 1, 32, 32) (1p) -> NO ERROR, returned (1,1,32,32), buffer is out
+                                     out holds 1024/1024 correct, 0/1024 untouched, distinct values [7.40625]
+C ttnn.exp  same volume, transposed in (1, 1, 32, 64) (2p) out (1, 1, 64, 32) (2p) -> NO ERROR, returned (1,1,64,32), buffer is out
+                                     out holds 2048/2048 correct, 0/2048 untouched, distinct values [7.40625]
+D ttnn.relu out 3x too big         in (1, 1, 32, 32) (1p) out (1, 1, 32, 96) (3p) -> NO ERROR, returned (1,1,32,96), buffer is out
+                                     out holds 3072/3072 correct, 0/3072 untouched, distinct values [2.0]
+E ttnn.add  out 4x too big (control) in (1, 1, 32, 32) (1p) out (1, 1, 64, 64) (4p) -> RAISED from binary_ng_device_operation.cpp
+    TT_FATAL: Shape of Output tensor Shape([1, 1, 64, 64]) provided does not match the broadcasted output shape Shape([1, 1, 32, 32])
+
+  7.40625 = bf16 exp(2). In A the other 3072 elements are 1.0 = exp(0), i.e. zeros read from past the end of
+  the 1-page input buffer; in D the two out-of-range tiles came back as 2.0 instead. Nothing is left holding
+  the -99 sentinel, so every tile was written. The work split is sized from the output
+  (unary_program_factory.cpp:206, output.physical_volume() / tile_hw).
+
+$ pytest tests/ttnn/unit_tests/operations/eltwise/test_unary.py -k preallocated_output
+================= 15 failed, 1 passed, 844 deselected in 2.53s =================
+
+
+$ git checkout <this branch> && python probe_outshape2.py                    # AFTER
+A ttnn.exp  out 4x too big         in (1, 1, 32, 32) (1p) out (1, 1, 64, 64) (4p) -> RAISED from unary_device_operation.cpp
+    TT_FATAL: Unary: Preallocated output shape must match computed shape. Computed: Shape([1, 1, 32, 32]), Preallocated: Shape([1, 1, 64, 64])
+B ttnn.exp  out 4x too small       in (1, 1, 64, 64) (4p) out (1, 1, 32, 32) (1p) -> RAISED from unary_device_operation.cpp
+    TT_FATAL: Unary: Preallocated output shape must match computed shape. Computed: Shape([1, 1, 64, 64]), Preallocated: Shape([1, 1, 32, 32])
+C ttnn.exp  same volume, transposed in (1, 1, 32, 64) (2p) out (1, 1, 64, 32) (2p) -> RAISED from unary_device_operation.cpp
+    TT_FATAL: Unary: Preallocated output shape must match computed shape. Computed: Shape([1, 1, 32, 64]), Preallocated: Shape([1, 1, 64, 32])
+D ttnn.relu out 3x too big         in (1, 1, 32, 32) (1p) out (1, 1, 32, 96) (3p) -> RAISED from unary_device_operation.cpp
+    TT_FATAL: Unary: Preallocated output shape must match computed shape. Computed: Shape([1, 1, 32, 32]), Preallocated: Shape([1, 1, 32, 96])
+E ttnn.add  out 4x too big (control) in (1, 1, 32, 32) (1p) out (1, 1, 64, 64) (4p) -> RAISED from binary_ng_device_operation.cpp   (unchanged)
+
+$ pytest tests/ttnn/unit_tests/operations/eltwise/test_unary.py -k preallocated_output
+====================== 16 passed, 844 deselected in 0.30s ======================
+
+$ pytest tests/ttnn/unit_tests/operations/eltwise/test_unary.py -k "not 262144"
+=========== 853 passed, 4 deselected, 3 xfailed in 80.90s (0:01:20) ============
+      (the 4 deselected are 8.4M-element shapes this 13 GB laptop cannot hold; on main the same
+       run is 838 passed, 15 failed -- the 15 being the new test)
+
+$ # Still open, same dead guard, not fixed by this PR:
+F ttnn.where out 4x too big        in (1, 1, 32, 32) (1p) out (1, 1, 64, 64) (4p) -> NO ERROR, returned (1,1,64,64), buffer is out
