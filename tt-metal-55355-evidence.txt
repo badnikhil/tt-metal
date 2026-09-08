@@ -1,0 +1,41 @@
+$ # tt-metal #55355 -- Quasar bf16 SFPU multiply truncates instead of rounding to nearest-even. Branch fix/quasar-mul-rne (badnikhil/tt-metal)
+$ # No Quasar silicon; ttsim libttsim_qsr.so v1.10.6 opens a device but ttnn eltwise ops abort before any kernel
+$ # ("DataMovementKernel is not supported on Quasar"), so the kernel is verified three ways:
+$ #  (1) host-side SFPI compile of the Quasar kernel with the tt-llk Quasar test-harness flags,
+$ #  (2) objdump of the compiled kernel: only the bf16-dest MUL instantiation changes,
+$ #  (3) the same operand pairs on ttsim Blackhole (libttsim_bh.so v1.10.6) = the RNE behaviour Quasar is aligned to.
+
+$ riscv-tt-elf-g++ -mcpu=tt-qsr32-tensix -O3 -std=c++17 -ftt-nttp ... -Wall -Werror -DARCH_QUASAR -DCOMPILE_FOR_TRISC=3 -DLLK_TRISC_SFPU \
+    -I.../hw/ckernels/quasar/metal/llk_api/llk_sfpu ... -c quasar_compile_check.cpp   # instantiates MUL<bf16 dest>, MUL<fp32 dest>, DIV, ADD<NearestEven>
+  base   (origin/main e7c0152e): EXIT=0, 0 warnings, check_base.o = 19620 bytes
+  55355  (fix/quasar-mul-rne): EXIT=0, 0 warnings, check_55355.o = 19724 bytes
+
+$ riscv-tt-elf-objdump -d check_base.o check_55355.o | diff   # per-instantiation instruction counts
+  calculate_sfpu_binary<MUL, is_fp32_dest_acc_en=false>   32 -> 58 instrs  (+ float32_to_bf16_rne: shift/and/iadd chain, + 0*x guard)
+  calculate_sfpu_binary<MUL, is_fp32_dest_acc_en=true>    byte-identical (fp32 DEST: no narrowing, as on WH/BH)
+  calculate_sfpu_binary<DIV>, <ADD, NearestEven>           byte-identical
+  calculate_zero_comp<*> (36 instantiations)               byte-identical
+
+$ diff <(objdump MUL<bf16> base) <(objdump MUL<bf16> fixed) | grep "^>" | head   # new SFPU instructions
+> sfpmul L0,L3,L2,0
+> sfpshft L1,L0,0xFF0,5
+> sfploadi L4,1,2
+> sfpand L1,L4
+> sfploadi L4,32767,2
+> sfpiadd L0,L4,0x000,4
+> sfpiadd L0,L1,0x000,4
+> sfploadi L1,-1,0
+> sfpand L0,L1
+> sfpsetcc L3,0x800,2
+> sfpsetcc L2,0x800,2
+> sfpcompc
+> sfpmov L0,L9,0
+> sfpencc 0x003,10
+> sfpmul L0,L3,L2,0
+> sfpshft L1,L0,0xFF0,5
+
+$ # (3) Reference: ttsim Blackhole, TT_METAL_SLOW_DISPATCH_MODE=1, ttnn.mul on bf16 tiles (calculate_sfpu_binary_mul, software RNE)
+$ nice -n 19 ionice -c3 python repro_qsr.py
+mul [(1.25, 1.609375), (0.1064453125, -2.359375), (3.25, 1.1953125), (0.75, 2.703125)] -> [2.015625, -0.251953125, 3.890625, 2.03125]
+  golden RNE (torch bf16)    [2.015625, -0.251953125, 3.890625, 2.03125]
+  truncation would give:   [2.0, -0.25, 3.875, 2.015625]  <- what the unfixed Quasar MUL branch (SFPSTORE truncate) produces

@@ -1,0 +1,34 @@
+$ # tt-metal #55273 -- Quasar gtz/gez/ltz/lez return 1 for NaN. Branch fix/quasar-nan-compare (badnikhil/tt-metal)
+$ # No Quasar silicon; ttsim libttsim_qsr.so v1.10.6 opens a device but ttnn eltwise ops abort before any kernel
+$ # ("DataMovementKernel is not supported on Quasar"), so the kernel is verified three ways:
+$ #  (1) host-side SFPI compile of the Quasar kernel with the tt-llk Quasar test-harness flags,
+$ #  (2) objdump of the compiled kernel: only the four Float32 sign-sensitive modes change,
+$ #  (3) the same inputs on ttsim Blackhole (libttsim_bh.so v1.10.6) = the behaviour Quasar is aligned to.
+
+$ riscv-tt-elf-g++ -mcpu=tt-qsr32-tensix -O3 -std=c++17 -ftt-nttp ... -Wall -Werror -DARCH_QUASAR -DCOMPILE_FOR_TRISC=3 -DLLK_TRISC_SFPU \
+    -I.../hw/ckernels/quasar/metal/llk_api/llk_sfpu ... -c quasar_compile_check.cpp   # instantiates all 6 comp modes x 6 dst formats
+  base   (origin/main e7c0152e): EXIT=0, 0 warnings, check_base.o = 19620 bytes
+  55273  (fix/quasar-nan-compare): EXIT=0, 0 warnings, check_55273.o = 19684 bytes
+
+$ riscv-tt-elf-objdump -d check_base.o check_55273.o | diff   # per-instantiation instruction counts (SFPU instrs per unrolled iteration in brackets)
+  calculate_zero_comp<Float32, less_than_zero>          18 -> 21 instrs   [8 -> 11]  (+ SFPLOADI 0x7F80 inf, |v| <= inf test)
+  calculate_zero_comp<Float32, greater_than_zero>       18 -> 21 instrs   [8 -> 11]
+  calculate_zero_comp<Float32, greater_than_equal_zero> 18 -> 23 instrs   [8 -> 13]  (+ second chain: |v| > inf -> write 0)
+  calculate_zero_comp<Float32, less_than_equal_zero>    18 -> 23 instrs   [8 -> 13]
+  calculate_zero_comp<Float32, equal_zero|not_equal_zero>      byte-identical (NaN already handled by |v| != 0)
+  calculate_zero_comp<Int32|Int16|UInt16|Int8|UInt8, all 6>   byte-identical (30 instantiations, integer formats skip the NaN term)
+
+$ diff <(objdump gtz<Float32> base) <(objdump gtz<Float32> fixed)   # new instructions in the per-row chain
+> sfploadi L0,1,2
+> sfploadi L0,32640,8
+> sfpiadd L0,L1,0x000,2
+
+$ # (3) Reference: ttsim Blackhole, TT_METAL_SLOW_DISPATCH_MODE=1, ttnn.<op> on a bf16 tile; lane 2 is -NaN (0xFFC0)
+$ nice -n 19 ionice -c3 python repro_qsr.py
+gtz  ['nan', 'nan', 'inf', '-inf', '0', '-0', '1', '-1'] -> [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+gez  ['nan', 'nan', 'inf', '-inf', '0', '-0', '1', '-1'] -> [0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 1.0, 0.0]
+ltz  ['nan', 'nan', 'inf', '-inf', '0', '-0', '1', '-1'] -> [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+lez  ['nan', 'nan', 'inf', '-inf', '0', '-0', '1', '-1'] -> [0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0]
+eqz  ['nan', 'nan', 'inf', '-inf', '0', '-0', '1', '-1'] -> [0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0]
+nez  ['nan', 'nan', 'inf', '-inf', '0', '-0', '1', '-1'] -> [1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0]
+  -> torch: gt/ge/lt/le(NaN, 0) are all False. WH/BH give 0 for NaN; Quasar (source, unfixed) gives gtz/gez(+NaN)=1, ltz/lez(-NaN)=1.
