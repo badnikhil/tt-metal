@@ -1,0 +1,30 @@
+$ # ttnn.sigmoid_bw: the gradient is exactly 0 for every large positive input
+$ #   ttsim Blackhole v1.10.6, all 65,536 bfloat16 bit patterns as the input, grad = 1
+$ #   golden = sigmoid(x) * sigmoid(-x) evaluated in float64, subnormal inputs/goldens excluded
+
+$ git checkout origin/main && ninja _ttnn.so && python check_bw2.py sigmoid_bw       # BEFORE
+sigmoid_bw   bfloat16 zeros_where_normal=   487 range=[6.25, 87]     max_ulp=       15100 mean_ulp=80.0844
+sigmoid_bw   float32  zeros_where_normal=   297 range=[16.75, 87]    max_ulp=   862212012 mean_ulp=2511838.3080
+  sigmoid_bw float32 x=5     got=0.00664803 want=0.00664806   x=10    got=4.53571e-05 want=4.53958e-05
+                     x=16.75 got=0          want=5.31578e-08  x=20    got=0           want=2.06115e-09
+                     x=30    got=0          want=9.35762e-14  x=60    got=0           want=8.75651e-27
+                     x=85    got=0          want=1.2161e-37
+
+$ git checkout fix/sigmoid-bw-stable && ninja _ttnn.so && python check_bw2.py sigmoid_bw  # AFTER
+sigmoid_bw   bfloat16 zeros_where_normal=     0 range=-              max_ulp=           2 mean_ulp=0.0218
+sigmoid_bw   float32  zeros_where_normal=     0 range=-              max_ulp=           4 mean_ulp=0.0668
+  sigmoid_bw float32 x=5     got=0.00664806 want=0.00664806   x=10    got=4.53958e-05 want=4.53958e-05
+                     x=16.75 got=5.31579e-08 want=5.31578e-08 x=20    got=2.06115e-09 want=2.06115e-09
+                     x=30    got=9.35762e-14 want=9.35762e-14 x=60    got=8.75651e-27 want=8.75651e-27
+                     x=85    got=1.2161e-37 want=1.2161e-37
+
+$ # regression test, tests/ttnn/nightly/unit_tests/operations/eltwise/backward/test_backward_sigmoid.py
+$ pytest test_backward_sigmoid.py -q   # on origin/main
+FAILED test_bw_sigmoid_all_bitpatterns[dtype=torch.bfloat16]
+E   AssertionError: 487 inputs returned a zero gradient, first at x=6.25
+FAILED test_bw_sigmoid_all_bitpatterns[dtype=torch.float32]
+E   AssertionError: 297 inputs returned a zero gradient, first at x=16.75
+3 passed, 2 failed
+
+$ pytest test_backward_sigmoid.py -q   # on fix/sigmoid-bw-stable
+5 passed

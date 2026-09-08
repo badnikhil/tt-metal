@@ -1,0 +1,35 @@
+$ # ttnn.asinh_bw: 1/sqrt(1 + x*x) collapses to 0 once x*x overflows -- 24% of the bfloat16 domain
+$ #   ttsim Blackhole v1.10.6, all 65,536 bfloat16 bit patterns as the input, grad = 1
+$ #   golden = 1/sqrt(1 + x*x) evaluated in float64, subnormal inputs and subnormal goldens excluded
+
+$ git checkout origin/main && ninja _ttnn.so && python check_bw2.py asinh_bw       # BEFORE
+asinh_bw     bfloat16 zeros_where_normal= 15874 range=[-8.51e37, 8.51e37]  max_ulp=      8064 mean_ulp=996.38
+asinh_bw     float32  zeros_where_normal= 15874 range=[-8.51e37, 8.51e37]  max_ulp= 528482304 mean_ulp=65295045.59
+  asinh_bw  float32  x=1       got=0.707107    want=0.707107     x=1e+10   got=1e-10       want=1e-10
+                     x=1.8e+19 got=5.55556e-20 want=5.55556e-20  x=2e+19   got=0           want=5e-20
+                     x=1e+25   got=0           want=1e-25        x=1e+30   got=0           want=1e-30
+                     x=8.5e+37 got=0           want=1.17647e-38
+
+$ git checkout fix/asinh-bw-overflow && ninja _ttnn.so && python check_bw2.py asinh_bw  # AFTER
+asinh_bw     bfloat16 zeros_where_normal=     2 range=[-8.51e37, 8.51e37]  max_ulp=       128 mean_ulp=0.0639
+asinh_bw     float32  zeros_where_normal=     2 range=[-8.51e37, 8.51e37]  max_ulp=   8388608 mean_ulp=1221.687
+  asinh_bw  float32  x=1       got=0.707107    want=0.707107     x=1e+10   got=1e-10       want=1e-10
+                     x=1.8e+19 got=5.55556e-20 want=5.55556e-20  x=2e+19   got=5e-20       want=5e-20
+                     x=1e+25   got=1e-25       want=1e-25        x=1e+30   got=1e-30       want=1e-30
+                     x=8.5e+37 got=1.17549e-38 want=1.17647e-38
+
+$ # the 2 remaining zeros and the residual ULP are ttnn.reciprocal's own profile at the bottom
+$ # of the normal range, unchanged by this PR:
+reciprocal   float32  zero_for_normal=2 (x = +/-2^126, 1/x = FLT_MIN)  max_ulp=8388608  mean_ulp=1221.70
+
+$ # regression test, tests/ttnn/nightly/unit_tests/operations/eltwise/backward/test_backward_asinh.py
+$ pytest test_backward_asinh.py -q     # on origin/main
+FAILED test_bw_asinh_all_bitpatterns[dtype=torch.bfloat16]
+E   AssertionError: 9218 inputs returned a zero gradient, first at x=1.8446744073709552e+19
+FAILED test_bw_asinh_all_bitpatterns[dtype=torch.float32]
+E   AssertionError: 9218 inputs returned a zero gradient, first at x=1.8446744073709552e+19
+$ # 9218 rather than 15874: the test only checks gradients above 2^-100, see the docstring
+3 passed, 2 failed
+
+$ pytest test_backward_asinh.py -q     # on fix/asinh-bw-overflow
+5 passed
