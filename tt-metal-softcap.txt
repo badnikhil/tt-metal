@@ -1,0 +1,23 @@
+$ # ttnn.softcap(x, beta): small inputs return exactly 0
+$ #   ttsim Blackhole v1.10.6, all 65,536 bfloat16 bit patterns, golden = beta*tanh(x/beta) in float64
+
+$ git checkout origin/main && python check_softcap.py          # BEFORE
+beta=30       zeros_where_normal= 1250 max_ulp=   753 at x=-3.526483e-37 got=0 want=-3.526483e-37 mean_ulp=8.4702
+beta=25       zeros_where_normal= 1170 max_ulp=   713 at x=-2.938736e-37 got=0 want=-2.938736e-37 mean_ulp=7.5687
+beta=50       zeros_where_normal= 1426 max_ulp=   841 at x=-5.877472e-37 got=0 want=-5.877472e-37 mean_ulp=10.6276
+beta=3        zeros_where_normal=  386 max_ulp=   321 at x=-3.526483e-38 got=0 want=-3.526483e-38 mean_ulp=1.3357
+beta=1        zeros_where_normal=    2 max_ulp=   129 at x=-1.175494e-38 got=0 want=-1.175494e-38 mean_ulp=0.0072
+beta=0.5      zeros_where_normal=    2 max_ulp=   129 at x=-1.175494e-38 got=0 want=-1.175494e-38 mean_ulp=0.0072
+beta=0.001    zeros_where_normal=    2 max_ulp=   129 at x=-1.175494e-38 got=0 want=-1.175494e-38 mean_ulp=0.0069
+
+$ git checkout fix/softcap-underflow && python check_softcap.py    # AFTER
+beta=30       zeros_where_normal=    0 max_ulp=     1 at x=2.78125 got=2.78125 want=2.765625 mean_ulp=0.0027
+beta=25       zeros_where_normal=    0 max_ulp=     1 at x=1.945312 got=1.945312 want=1.9375 mean_ulp=0.0030
+beta=50       zeros_where_normal=    0 max_ulp=     1 at x=3.890625 got=3.890625 want=3.875 mean_ulp=0.0030
+beta=3        zeros_where_normal=    0 max_ulp=     1 at x=0.2373047 got=0.2373047 want=0.2363281 mean_ulp=0.0031
+beta=1        zeros_where_normal=    0 max_ulp=     1 at x=0.09033203 got=0.09033203 want=0.08984375 mean_ulp=0.0033
+beta=0.5      zeros_where_normal=    0 max_ulp=     1 at x=0.04516602 got=0.04516602 want=0.04492188 mean_ulp=0.0033
+beta=0.001    zeros_where_normal=    0 max_ulp=     1 at x=8.964539e-05 got=8.964539e-05 want=8.916855e-05 mean_ulp=0.0030
+
+$ pytest tests/ttnn/unit_tests/operations/eltwise/test_unary.py -k softcap
+====================== 11 passed, 838 deselected in 1.70s ======================

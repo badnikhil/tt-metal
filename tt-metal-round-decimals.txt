@@ -1,0 +1,45 @@
+$ # ttnn.round(x, decimals=d): finite inputs come back as +/-inf
+$ #   ttsim Blackhole v1.10.6, all 65,536 bfloat16 bit patterns, golden = torch.round(x.double(), decimals=d)
+
+$ git checkout origin/main && python check_round.py            # BEFORE
+bfloat16 decimals=-6  inf_from_finite=    0 max_ulp=       1 at x=4521984 got=4980736 want=5013504 nan_match=False
+bfloat16 decimals=-2  inf_from_finite=    0 max_ulp=       1 at x=1056 got=1096 want=1104 nan_match=False
+bfloat16 decimals=-1  inf_from_finite=    0 max_ulp=       1 at x=548 got=548 want=552 nan_match=False
+bfloat16 decimals=0   inf_from_finite=    0 max_ulp=       1 at x=-0 got=0 want=-0 nan_match=False
+bfloat16 decimals=1   inf_from_finite=  870 max_ulp=       1 at x=0.05004883 got=0.09960938 want=0.1000977 nan_match=False
+bfloat16 decimals=2   inf_from_finite= 1720 max_ulp=       1 at x=0.005004883 got=0.00994873 want=0.01000977 nan_match=False
+bfloat16 decimals=3   inf_from_finite= 2552 max_ulp=       1 at x=0.002502441 got=0.002990723 want=0.003005981 nan_match=False
+bfloat16 decimals=5   inf_from_finite= 4272 max_ulp=       1 at x=5.00679e-06 got=9.953976e-06 want=1.001358e-05 nan_match=False
+bfloat16 decimals=7   inf_from_finite= 5970 max_ulp=       1 at x=5.005859e-08 got=9.965152e-08 want=1.001172e-07 nan_match=False
+float32  decimals=-6  inf_from_finite=    0 max_ulp=     122 at x=1.309965e+11 got=1.30996e+11 want=1.30997e+11 nan_match=True
+float32  decimals=-2  inf_from_finite=    0 max_ulp=      13 at x=1.111491e+08 got=1.11149e+08 want=1.111491e+08 nan_match=True
+float32  decimals=-1  inf_from_finite=    0 max_ulp=       2 at x=4.272947e+07 got=4.272948e+07 want=4.272947e+07 nan_match=True
+float32  decimals=0   inf_from_finite=    0 max_ulp=       0 at x=0 got=0 want=0 nan_match=True
+float32  decimals=1   inf_from_finite=  870 max_ulp=       1 at x=0.8515625 got=0.9 want=0.9 nan_match=True
+float32  decimals=2   inf_from_finite= 1720 max_ulp=       1 at x=0.04516602 got=0.05 want=0.05 nan_match=True
+float32  decimals=3   inf_from_finite= 2552 max_ulp=       1 at x=0.004516602 got=0.005 want=0.005 nan_match=True
+float32  decimals=5   inf_from_finite= 4272 max_ulp=       1 at x=6.532669e-05 got=6.999999e-05 want=7e-05 nan_match=True
+float32  decimals=7   inf_from_finite= 5970 max_ulp=     215 at x=0.00668335 got=0.0066834 want=0.0066833 nan_match=True
+
+$ git checkout fix/round-decimals-overflow && python check_round.py   # AFTER
+bfloat16 decimals=-6  inf_from_finite=    0 max_ulp=       1 at x=4521984 got=4980736 want=5013504 nan_match=False
+bfloat16 decimals=-2  inf_from_finite=    0 max_ulp=       1 at x=1056 got=1096 want=1104 nan_match=False
+bfloat16 decimals=-1  inf_from_finite=    0 max_ulp=       1 at x=548 got=548 want=552 nan_match=False
+bfloat16 decimals=0   inf_from_finite=    0 max_ulp=       1 at x=-0 got=0 want=-0 nan_match=False
+bfloat16 decimals=1   inf_from_finite=    0 max_ulp=       1 at x=0.05004883 got=0.09960938 want=0.1000977 nan_match=False
+bfloat16 decimals=2   inf_from_finite=    0 max_ulp=       1 at x=0.005004883 got=0.00994873 want=0.01000977 nan_match=False
+bfloat16 decimals=3   inf_from_finite=    0 max_ulp=       1 at x=0.002502441 got=0.002990723 want=0.003005981 nan_match=False
+bfloat16 decimals=5   inf_from_finite=    0 max_ulp=       1 at x=5.00679e-06 got=9.953976e-06 want=1.001358e-05 nan_match=False
+bfloat16 decimals=7   inf_from_finite=    0 max_ulp=       1 at x=5.005859e-08 got=9.965152e-08 want=1.001172e-07 nan_match=False
+float32  decimals=-6  inf_from_finite=    0 max_ulp=     122 at x=1.309965e+11 got=1.30996e+11 want=1.30997e+11 nan_match=True
+float32  decimals=-2  inf_from_finite=    0 max_ulp=      13 at x=1.111491e+08 got=1.11149e+08 want=1.111491e+08 nan_match=True
+float32  decimals=-1  inf_from_finite=    0 max_ulp=       2 at x=4.272947e+07 got=4.272948e+07 want=4.272947e+07 nan_match=True
+float32  decimals=0   inf_from_finite=    0 max_ulp=       0 at x=0 got=0 want=0 nan_match=True
+float32  decimals=1   inf_from_finite=    0 max_ulp=       1 at x=0.8515625 got=0.9 want=0.9 nan_match=True
+float32  decimals=2   inf_from_finite=    0 max_ulp=       1 at x=0.04516602 got=0.05 want=0.05 nan_match=True
+float32  decimals=3   inf_from_finite=    0 max_ulp=       1 at x=0.004516602 got=0.005 want=0.005 nan_match=True
+float32  decimals=5   inf_from_finite=    0 max_ulp=       1 at x=6.532669e-05 got=6.999999e-05 want=7e-05 nan_match=True
+float32  decimals=7   inf_from_finite=    0 max_ulp=     215 at x=0.00668335 got=0.0066834 want=0.0066833 nan_match=True
+
+$ pytest tests/ttnn/unit_tests/operations/eltwise/test_round.py
+============================== 40 passed in 6.19s ==============================
